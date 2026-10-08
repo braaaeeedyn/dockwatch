@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Secrets and local config
+.env
+*.pem
+credentials*
+
+# Data and runtime state
+data/
+checkpoints/
+spark-warehouse/
+metastore_db/
+web/data/*.json
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,120 @@
+# DockWatch local stack. Services are grouped into profiles so they fit in ~8 GB of Docker memory:
+#   stream: Redpanda (+ Console), SeaweedFS (S3 API), Iceberg REST catalog, Postgres (ops DB with logical
+#           replication, plus the iceberg_catalog database)
+#   batch:  Airflow, Trino            (added in M4)
+#   obs:    Marquez                   (added in M5)
+# Start with: python tasks.py up stream
+
+name: dockwatch
+
+services:
+  redpanda:
+    profiles: [stream]
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda start
+      - --mode dev-container
+      - --smp 1
+      - --memory 1G
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+    ports: ["19092:19092", "18081:18081"]
+    volumes: [redpanda:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  console:
+    profiles: [stream]
+    image: redpandadata/console:v2.7.2
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports: ["8088:8080"]  # 8080 is often taken locally
+    depends_on:
+      redpanda: { condition: service_healthy }
+
+  s3:
+    # SeaweedFS with its S3 gateway stands in for S3 locally (MinIO's images are no longer published).
+    # Credentials come from infra/seaweedfs/s3.json (local-only values, also in .env.example).
+    profiles: [stream]
+    image: chrislusf/seaweedfs:3.80
+    command: server -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=256
+    ports: ["8333:8333"]
+    volumes:
+      - s3:/data
+      - ./infra/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  iceberg-rest:
+    profiles: [stream]
+    image: tabulario/iceberg-rest:1.6.0
+    environment:
+      # Catalog pointers live in Postgres (database iceberg_catalog on ops-db). The image's default in-memory SQLite
+      # loses every table on restart, and a SQLite file fails concurrent streaming commits (SQLITE_BUSY).
+      CATALOG_URI: jdbc:postgresql://ops-db:5432/iceberg_catalog
+      CATALOG_JDBC_USER: ops
+      CATALOG_JDBC_PASSWORD: ops-local-only
+      CATALOG_WAREHOUSE: s3://dockwatch/warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://s3:8333
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${DOCKWATCH_S3_ACCESS_KEY:-dockwatch}
+      AWS_SECRET_ACCESS_KEY: ${DOCKWATCH_S3_SECRET_KEY:-dockwatch-local-only}
+      AWS_REGION: ${DOCKWATCH_S3_REGION:-us-west-2}
+    ports: ["8181:8181"]
+    depends_on:
+      s3: { condition: service_healthy }
+      ops-db: { condition: service_healthy }
+
+  ops-db:
+    profiles: [stream]
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    environment:
+      POSTGRES_DB: ops
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops-local-only
+    ports: ["5434:5432"]  # 5432/5433 are often taken by other local projects
+    volumes:
+      - ops-db:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro  # also creates the iceberg_catalog database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops -d ops"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  status-stream:
+    # M2 streaming job. Separate profile so it only starts on purpose: python tasks.py stream
+    profiles: [spark]
+    build: infra/spark
+    image: dockwatch-spark:3.5.5
+    command: >
+      /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g
+      --conf spark.sql.streaming.stateStore.providerClass=org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider
+      /opt/dockwatch/src/dockwatch/streaming/status_stream.py
+    environment:
+      DOCKWATCH_TARGET: local
+      DOCKWATCH_S3_BUCKET: dockwatch
+      AWS_ACCESS_KEY_ID: ${DOCKWATCH_S3_ACCESS_KEY:-dockwatch}
+      AWS_SECRET_ACCESS_KEY: ${DOCKWATCH_S3_SECRET_KEY:-dockwatch-local-only}
+      AWS_REGION: ${DOCKWATCH_S3_REGION:-us-west-2}
+    volumes:
+      - ./src:/opt/dockwatch/src:ro
+      - checkpoints:/checkpoints
+    ports: ["4040:4040"]  # Spark UI
+    mem_limit: 2g
+    restart: unless-stopped
+
+volumes:
+  checkpoints:
+  redpanda:
+  s3:
+  ops-db:

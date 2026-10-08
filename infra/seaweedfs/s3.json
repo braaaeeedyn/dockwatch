@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "dockwatch-local",
+      "credentials": [{ "accessKey": "dockwatch", "secretKey": "dockwatch-local-only" }],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+ "data": {
+  "stations": [
+   {
+    "station_id": "0d730ac1-7ce6-45cf-aca6-b412ea46709d",
+    "name": "Mission St at 1st St",
+    "short_name": "SJ-H10",
+    "lon": -121.9020161,
+    "lat": 37.3509643,
+    "region_id": "5",
+    "capacity": 27,
+    "rental_uris": {
+     "android": "https://sfo.lft.to/lastmile_qr_scan",
+     "ios": "https://sfo.lft.to/lastmile_qr_scan"
+    },
+    "is_charging": false
+   },
+   {
+    "station_id": "ed707a89-a68d-4921-a4cb-16c268e45a5b",
+    "name": "San Fernando St at 7th St",
+    "short_name": "SJ-M11-2",
+    "lon": -121.88321471214294,
+    "lat": 37.3371223728942,
+    "region_id": "5",
+    "capacity": 23,
+    "rental_uris": {
+     "android": "https://sfo.lft.to/lastmile_qr_scan",
+     "ios": "https://sfo.lft.to/lastmile_qr_scan"
+    },
+    "is_charging": false
+   },
+   {
+    "station_id": "2264274964225258560",
+    "name": "VIRTUAL STATION: San Francisco Public Library",
+    "address": "29 Grove St, San Francisco, CA 94102-4702, United States",
+    "lon": -122.4158884,
+    "lat": 37.7788093,
+    "capacity": 12,
+    "rental_uris": {
+     "android": "https://sfo.lft.to/lastmile_qr_scan",
+     "ios": "https://sfo.lft.to/lastmile_qr_scan"
+    }
+   }
+  ]
+ },
+ "last_updated": 1791411184,
+ "ttl": 60,
+ "version": "2.3"
+}

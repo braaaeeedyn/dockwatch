@@ -1,0 +1,49 @@
+[project]
+name = "dockwatch"
+version = "0.1.0"
+description = "Real-time Bay Wheels bike-share lakehouse: GBFS -> Kafka -> Spark -> Iceberg."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "tzdata>=2024.1",  # Windows has no system time-zone database (zoneinfo needs it)
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.3",
+]
+producer = [
+    "httpx>=0.27",
+    "confluent-kafka>=2.5",
+    "boto3>=1.35",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dockwatch"]
+
+[tool.uv]
+default-groups = ["dev", "producer"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PT"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs the Docker 'stream' profile running (python tasks.py up stream)",
+    "network: calls the live Bay Wheels GBFS feed",
+    "spark: needs PySpark + Java 17; run inside the Spark image with python tasks.py test-spark",
+]
+addopts = "-m 'not integration and not network'"
