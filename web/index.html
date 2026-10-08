@@ -154,7 +154,8 @@
         <p class="caption" data-kpi-caption>All three regions. From live.json and alerts.json, written by the DockWatch exporter every minute.</p>
       </section>
 
-      <!-- Desktop: the map spans the content width for now. F3 adds the alerts rail as a second column of .live-layout. -->
+      <!-- Desktop (>= 1120 px): map (2/3) and the sticky alerts rail (1/3). Tablet: the rail is a card under the map.
+           Phone (< 600 px): the rail section is not shown; the peek bar after .live-layout opens the alerts sheet. -->
       <div class="live-layout">
         <section id="map" class="map-card is-loading" tabindex="-1" aria-labelledby="map-title" data-view="map">
           <h2 id="map-title" class="visually-hidden">Station map</h2>
@@ -223,8 +224,43 @@
           </div>
           <p class="visually-hidden" aria-live="polite" data-map-summary></p>
         </section>
+        <section class="alerts" data-alerts-rail aria-labelledby="alerts-title">
+          <h2 id="alerts-title" class="alerts__title">Alerts</h2>
+          <div class="alerts__body" data-alerts-body aria-busy="true">
+            <div class="alerts__skeleton" data-alerts-skeleton aria-hidden="true">
+              <div class="alerts__skeleton-row skeleton"></div>
+              <div class="alerts__skeleton-row skeleton"></div>
+              <div class="alerts__skeleton-row skeleton"></div>
+              <div class="alerts__skeleton-row skeleton"></div>
+            </div>
+            <div class="alerts__message card-soft" data-alerts-message hidden>
+              <p>Alerts couldn’t be loaded. Check your connection, then try again.</p>
+              <button type="button" class="button-secondary" data-alerts-retry>Retry</button>
+            </div>
+            <p class="alerts__note card-soft" data-alerts-replay-note hidden>Alerts aren’t part of the replay. Exit the replay to see live alerts.</p>
+            <div class="alerts__lists" data-alerts-lists hidden>
+              <h3 class="alerts__heading">Open now <span class="alerts__count data" data-alerts-count="open"></span></h3>
+              <p class="alerts__empty card-soft" data-alerts-none hidden>No open alerts right now.</p>
+              <ul class="alerts__list" role="list" data-alerts-open></ul>
+              <h3 class="alerts__heading" data-alerts-resolved-heading>Recently resolved <span class="alerts__count data" data-alerts-count="resolved"></span></h3>
+              <ul class="alerts__list" role="list" data-alerts-resolved></ul>
+            </div>
+          </div>
+          <p class="visually-hidden" aria-live="polite" data-alerts-announcer></p>
+        </section>
       </div>
+      <button type="button" class="alerts-peek" data-alerts-peek aria-haspopup="dialog" aria-disabled="true"><span data-alerts-peek-text>Loading alerts…</span></button>
     </main>
+    <dialog class="sheet alerts-sheet" data-alerts-sheet aria-labelledby="alerts-sheet-title">
+      <div class="sheet__handle" aria-hidden="true"></div>
+      <div class="sheet__head">
+        <h2 class="sheet__title" id="alerts-sheet-title">Alerts</h2>
+        <button type="button" class="icon-button" data-alerts-sheet-close aria-label="Close alerts">
+          <svg class="icon icon-x" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+        </button>
+      </div>
+      <div class="alerts-sheet__body" data-alerts-sheet-body></div>
+    </dialog>
     <dialog class="sheet" data-sheet aria-labelledby="sheet-title">
       <div class="sheet__handle" aria-hidden="true"></div>
       <div class="sheet__head">

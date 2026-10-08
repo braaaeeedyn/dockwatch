@@ -3,8 +3,13 @@
 // 10x speed with plain timers (so tests drive it with page.clock). The page renders each frame through its normal
 // code paths; this module knows nothing about the DOM.
 
+import { readJson } from "../util/read.js";
+
 export const REPLAY_URL = "data/replay.json";
 export const SPEED = 10; // DESIGN §7: "10× speed"
+// The file is up to ~1.5 MB, so the cap is 30 s (10 s would fail on links slower than about 1.2 Mbps). On timeout the
+// banner shows "The replay couldn’t be loaded" and the button can be pressed again.
+export const REPLAY_READ_TIMEOUT_MS = 30_000;
 
 /** True if a replay file is published (HEAD request, so the file itself is only fetched on demand). */
 export async function replayAvailable() {
@@ -16,11 +21,9 @@ export async function replayAvailable() {
   }
 }
 
-/** Fetch and check replay.json; throws if it can't be read or isn't format v1. */
+/** Fetch and check replay.json; throws if it can't be read in time or isn't format v1. */
 export async function loadReplay() {
-  const response = await fetch(REPLAY_URL, { cache: "no-store" });
-  if (!response.ok) throw new Error(`${REPLAY_URL}: HTTP ${response.status}`);
-  const doc = await response.json();
+  const doc = await readJson(REPLAY_URL, { timeoutMs: REPLAY_READ_TIMEOUT_MS });
   const ok =
     doc?.version === 1 &&
     doc.kind === "dockwatch-replay" &&

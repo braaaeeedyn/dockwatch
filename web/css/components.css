@@ -799,3 +799,269 @@
 .sheet__body {
   padding-top: var(--space-xs);
 }
+
+/* ==== F3: alerts rail, alert row, peek bar, alerts sheet (DESIGN.md §4, §7 Alert row, bottom sheet) ==== */
+
+/* The rail: a card under the map below 1120 px, a sticky rail beside it from 1120 px. Its rows lay out by the rail's own
+   width (container query), so they are two columns in the wide tablet card and one in the desktop rail. */
+.alerts {
+  container-type: inline-size;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.alerts__title {
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--fs-display-md);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Rows scroll inside the body, not the page (81 rows would push the footer ~5,000 px down on tablets). */
+.alerts__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-block-size: min(36rem, 70dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.alerts__body [hidden],
+.alerts-peek[hidden] {
+  display: none !important;
+}
+
+.alerts__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-lg) var(--space-lg) var(--space-sm);
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--fs-body-md);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.alerts__count {
+  display: inline-flex;
+  align-items: center;
+  min-width: 1.75rem;
+  justify-content: center;
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.alerts__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.alerts__list > li {
+  min-width: 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+@container (min-width: 40rem) {
+  .alerts__list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .alerts__list > li:nth-child(odd) {
+    border-right: 1px solid var(--hairline);
+  }
+}
+
+.alerts__message,
+.alerts__note,
+.alerts__empty {
+  margin: var(--space-lg);
+  color: var(--body);
+}
+
+.alerts__message {
+  display: grid;
+  gap: var(--space-md);
+  justify-items: start;
+}
+
+/* Loading: static skeleton rows of the final row size (DESIGN §5: no shimmer). */
+.alerts__skeleton {
+  display: grid;
+}
+
+.alerts__skeleton-row {
+  height: 70px;
+  margin: var(--space-md) var(--space-lg) 0;
+}
+
+/* ---- Alert row: state marker, name, "Empty for 34 min", region and start time ---- */
+.alert-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  column-gap: var(--space-md);
+  align-items: start;
+  width: 100%;
+  min-height: var(--touch-target);
+  padding: var(--space-md) var(--space-lg);
+  border: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+button.alert-row {
+  cursor: pointer;
+}
+
+button.alert-row:hover {
+  background: var(--surface-2);
+}
+
+/* Inset ring: the body clips anything drawn outside a row. */
+.alert-row:focus-visible {
+  outline-offset: -2px;
+}
+
+.alert-row__marker {
+  width: 12px;
+  height: 12px;
+  margin-top: calc((1.3em - 12px) / 2);
+}
+
+.alert-row__text {
+  display: grid;
+  min-width: 0;
+}
+
+.alert-row__name {
+  font-size: var(--fs-body-md);
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.alert-row__meta {
+  font-size: var(--fs-body-sm);
+  line-height: 1.45;
+  color: var(--body);
+}
+
+.alert-row__start {
+  color: var(--mute);
+}
+
+/* ---- Desktop: a sticky rail beside the map that fits the viewport under the nav ----
+   The rail also leaves room for what follows the map (main's bottom padding and the ~9 rem footer). If it were a full
+   viewport tall it would be taller than the map card, and sticky would have no room: at the end of the page its top
+   would slide under the nav. This way it stays whole under the nav from the top of the map to the bottom of the page. */
+@media (min-width: 1120px) {
+  .alerts {
+    position: sticky;
+    top: calc(var(--nav-height) + var(--grid-gap));
+    align-self: start;
+    max-block-size: max(20rem, calc(100dvh - var(--nav-height) - var(--grid-gap) - var(--section) - 10rem));
+  }
+
+  .alerts__body {
+    max-block-size: none;
+  }
+}
+
+/* ---- Phone: the peek bar replaces the rail; the announcer inside the rail stays rendered ---- */
+.alerts-peek {
+  display: none;
+}
+
+@media (max-width: 599.98px) {
+  :root {
+    --peek-height: calc(56px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .alerts {
+    border: 0;
+    border-radius: 0;
+  }
+
+  .alerts > :not([data-alerts-announcer]) {
+    display: none;
+  }
+
+  /* bottom-sheet surface: canvas, top radius lg, level-2 shadow (dark: raised surface + hairline) */
+  .alerts-peek {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: var(--peek-height);
+    margin: 0;
+    padding: 0 var(--gutter) env(safe-area-inset-bottom, 0px);
+    border: 0;
+    border-top: 1px solid var(--raised-border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--raised-bg);
+    color: var(--ink);
+    box-shadow: var(--shadow-2);
+    font: inherit;
+    font-weight: 500;
+    line-height: 1.3;
+    text-align: left;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+
+  .alerts-peek::before {
+    content: "";
+    position: absolute;
+    top: var(--space-sm);
+    left: 50%;
+    width: 36px;
+    height: 4px;
+    margin-left: -18px;
+    border-radius: var(--radius-full);
+    background: var(--hairline);
+  }
+
+  .alerts-peek[aria-disabled="true"] {
+    color: var(--body);
+    cursor: progress;
+  }
+
+  .alerts-peek:focus-visible {
+    outline-offset: -4px;
+  }
+
+  /* The bar never covers the footer or a focused element. */
+  html:has(.alerts-peek:not([hidden])) {
+    scroll-padding-bottom: var(--peek-height);
+  }
+
+  body:has(.alerts-peek:not([hidden])) {
+    padding-bottom: var(--peek-height);
+  }
+}
+
+/* ---- Alerts sheet: the rail's body moves in here while it is open ---- */
+.alerts-sheet__body {
+  margin: var(--space-sm) calc(-1 * var(--gutter)) 0;
+}
+
+.alerts-sheet .alerts__body {
+  max-block-size: none;
+  overflow: visible;
+}

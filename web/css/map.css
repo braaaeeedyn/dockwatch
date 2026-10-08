@@ -6,7 +6,20 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--grid-gap);
-  /* F3 adds the alerts rail: two columns (map ≈ 2/3, rail ≈ 1/3) from 1120 px. */
+}
+
+/* Phone: the rail section is not shown (the peek bar and sheet replace it), so no gap is left for it. */
+@media (max-width: 599.98px) {
+  .live-layout {
+    gap: 0;
+  }
+}
+
+/* Desktop (DESIGN §4): map ≈ 2/3 and the alerts rail ≈ 1/3; the rail is sticky (components.css). */
+@media (min-width: 1120px) {
+  .live-layout {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
 }
 
 /* ---- Map card ---- */

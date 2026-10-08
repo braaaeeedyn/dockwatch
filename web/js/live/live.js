@@ -1,14 +1,17 @@
-// Live page (F2): KPI tiles, the station map with region / Map | List / "Show only problems" controls, legend,
-// station details, paused banner with "Replay a day", and the polite map summary. Data: live.json (shared 60 s poll in
-// freshness.js, delivered as "dockwatch:live" events), alerts.json (re-read with every live.json refresh),
-// geo/<region>.json, and data/replay.json on demand (replay.js).
+// Live page (F2, F3): KPI tiles, the station map with region / Map | List / "Show only problems" controls, legend,
+// station details, paused banner with "Replay a day", the polite map summary and the alerts rail (alerts.js). Data:
+// live.json (shared 60 s poll in freshness.js, delivered as "dockwatch:live" events), alerts.json (read at start and
+// re-read with every live.json refresh, 10 s read timeout), geo/<region>.json, and data/replay.json on demand
+// (replay.js, 30 s read timeout).
 // Paused = freshnessState() === "paused", the same rule and the same tick ("dockwatch:freshness") as the pill.
 // Replay mode renders decoded frames through the same paths as live data, without pulses, cross-fades or map-summary
 // announcements; live refreshes keep updating the pill but not the map until Exit.
 
 import { latestLive, refreshLive } from "../freshness.js";
 import { createStationMap } from "../map/map.js";
+import { readJson } from "../util/read.js";
 import { formatPausedAt, formatReplayDay, formatShortClock, freshnessState, parseTime } from "../util/time.js";
+import { createAlerts } from "./alerts.js";
 import { createDetails } from "./details.js";
 import { createKpis } from "./kpis.js";
 import { createList } from "./list.js";
@@ -17,6 +20,8 @@ import { DEFAULT_REGION, REGIONS, STATES, isProblem } from "./states.js";
 
 const STORAGE_KEY = "dockwatch-region";
 const TICK_MS = 15 * 1000;
+const ALERTS_URL = "data/alerts.json";
+const ALERTS_READ_TIMEOUT_MS = 10_000; // a stalled read ends in the rail's error message with Retry, not "Loading…"
 const number = new Intl.NumberFormat("en-US");
 
 function storedRegion() {
@@ -54,7 +59,10 @@ export function initLive() {
   const ui = initialState();
   const geoCache = new Map();
   let live = null;
-  let alerts = null; // object, or false when it couldn't be read
+  let alerts = null; // object, or false when it couldn't be read; null until the first read settles
+  let alertsAsked = 0; // alerts.json reads started, and the newest one applied: an older read never overwrites a newer
+  let alertsApplied = 0;
+  let stationIds = { live: null, ids: null }; // ids in `live`, for the rail's "is this row pressable"
   let geoError = false;
   let liveError = false;
   let renderedRegion = null; // region whose markers are on the map now
@@ -99,6 +107,14 @@ export function initLive() {
 
   const list = createList({ table: listView.querySelector("table"), caption: listView.querySelector("caption") });
 
+  const alertsRail = createAlerts({
+    section: document.querySelector("[data-alerts-rail]"),
+    peek: document.querySelector("[data-alerts-peek]"),
+    sheet: document.querySelector("[data-alerts-sheet]"),
+    onSelect: (alert) => selectAlert(alert),
+    onRetry: () => loadAlerts(),
+  });
+
   // ---- data helpers ----
   /** What the map shows: the current replay frame in replay mode, else the latest live export. */
   function shown() {
@@ -136,14 +152,28 @@ export function initLive() {
   }
 
   async function loadAlerts() {
+    const asked = ++alertsAsked;
+    let next = null;
     try {
-      const response = await fetch("data/alerts.json", { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      alerts = await response.json();
+      next = await readJson(ALERTS_URL, { timeoutMs: ALERTS_READ_TIMEOUT_MS });
     } catch {
-      alerts = alerts || false; // keep the last good copy if there is one
+      // HTTP error, bad JSON or no answer within 10 s
     }
+    if (asked < alertsApplied) return;
+    alertsApplied = asked;
+    alerts = next ?? (alerts || false); // keep the last good copy if there is one
     if (live && !replay) kpis.render(live, alerts);
+    renderAlerts();
+  }
+
+  /** The rail, from the latest alerts and live data (rows of stations not in live.json are not pressable). */
+  function renderAlerts() {
+    if (live && stationIds.live !== live) stationIds = { live, ids: new Set((live.stations ?? []).map((s) => s.id)) };
+    alertsRail.render(alerts ?? undefined, {
+      stations: live ? stationIds.ids : null,
+      waiting: !live && !liveError,
+      replay: replay !== null,
+    });
   }
 
   // ---- URL + controls ----
@@ -267,6 +297,7 @@ export function initLive() {
     banner.hidden = true;
     replayBanner.hidden = false;
     replayStatus.textContent = `Replay mode — showing ${formatReplayDay(doc.day)}, ${SPEED}× speed`;
+    renderAlerts(); // the rail shows its "not part of the replay" note
     replay.player.start();
     exitButton.focus();
   }
@@ -280,6 +311,7 @@ export function initLive() {
     replayClock.textContent = "";
     if (live) kpis.render(live, alerts);
     render(); // also shows the paused banner again if the data is still old
+    renderAlerts();
     const button = banner.querySelector("[data-replay-start]");
     if (!banner.hidden && button) button.focus();
     else root.focus();
@@ -379,6 +411,18 @@ export function initLive() {
     if (focus || via === "list") map.focusStation(id);
   }
 
+  /** An alert row was pressed (DESIGN §7): show the map, switch region if needed, then focus the station. */
+  async function selectAlert(alert) {
+    if (replay) return;
+    const station = (live?.stations ?? []).find((s) => s.id === alert.station_id);
+    if (!station) return;
+    if (ui.view === "list") setView("map");
+    // A region change hides the details, so select only after its shapes are loaded and drawn.
+    if (station.view !== ui.region) await setRegion(station.view);
+    if (ui.problemsOnly && !isProblem(station.state)) setProblems(false); // e.g. it recovered since the alert opened
+    select(station.id, { focus: true });
+  }
+
   // ---- events ----
   exitButton.addEventListener("click", exitReplay);
   for (const input of regionInputs) input.addEventListener("change", () => input.checked && setRegion(input.value));
@@ -401,9 +445,11 @@ export function initLive() {
     if (id) map.focusStation(id);
   });
 
-  // A click outside the map frame closes the tooltip.
+  // A click outside the map frame closes the tooltip. Alert rows open details, so they count as inside.
   document.addEventListener("click", (event) => {
-    const inside = frame.contains(event.target) || event.target.closest("[data-sheet], [data-show-station]");
+    const inside =
+      frame.contains(event.target) ||
+      event.target.closest("[data-sheet], [data-show-station], .alert-row, [data-alerts-sheet]");
     if (details.isOpen() && !inside) {
       details.hide();
       map.setSelected(null);
@@ -420,6 +466,7 @@ export function initLive() {
     }
     kpis.render(live, alerts);
     render({ animate: !first });
+    renderAlerts();
     loadAlerts();
   }
 
@@ -428,6 +475,7 @@ export function initLive() {
   document.addEventListener("dockwatch:live-error", () => {
     liveError = true;
     render();
+    renderAlerts();
   });
 
   // The pill's tick: the banner flips together with it.
@@ -435,10 +483,13 @@ export function initLive() {
 
   setInterval(() => {
     if (details.isOpen()) details.refresh(findStation);
+    alertsRail.tick(); // "Empty for 34 min" counts on, like the details and the list
   }, TICK_MS);
 
   // ---- start ----
   syncControls();
   setRegion(ui.region);
+  renderAlerts();
+  loadAlerts(); // independently of live.json, so the rail never waits on it
   if (latestLive()) onLive(latestLive());
 }

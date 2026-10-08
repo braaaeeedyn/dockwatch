@@ -587,3 +587,77 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
   and most of the connection churn behind (a), and any recurrence now names its cause in the test log.
 - ruff + ruff format clean; host pytest 53 passed / 1 skipped; Playwright 35/35 (shell 11, live map 14, touch
   targets 3, replay 7).
+
+## 2026-10-08 · F3 · alerts rail, peek bar and sheet; read timeouts for alerts and replay
+
+**Built**
+- **The alerts rail** (`web/js/live/alerts.js`, new), from `data/alerts.json` (exporter unchanged): "Open now" with
+  a count badge, open alerts longest-running first, then "Recently resolved" (newest first, at most 20). The browser
+  re-sorts defensively with a stable sort. Each row is a button: a 12 px state marker, the name (`translate="no"`),
+  "Empty for 34 min" / "Full, resolved after 22 min", and "San Francisco · started 3:32 PM" (with the date when the
+  start wasn't today in Pacific time). Rows for stations missing from `live.json` are static `div`s, so there are no
+  dead buttons. Loading = skeleton rows with `aria-busy`; no open alerts = a `card-soft` sentence; a failed read with
+  no earlier copy = "Alerts couldn’t be loaded. Check your connection, then try again." + Retry. A later failed read
+  keeps the last good copy.
+- **Per breakpoint:** from 1120 px `.live-layout` is `2fr 1fr` and the rail is sticky under the nav, with its rows
+  scrolling inside (`overscroll-behavior: contain`). From 600 to 1119 px it is a card under the map whose body scrolls
+  inside (`min(36rem, 70dvh)`), and a container query (`@container (min-width: 40rem)`) gives two columns of rows in
+  the wide card. Below 600 px the section isn't shown; a fixed **peek bar** ("61 open alerts", 56 px plus the
+  safe-area inset, bottom-sheet surface) opens the **alerts sheet** (`<dialog>`, `showModal()`). The page gets
+  `padding-bottom` / `scroll-padding-bottom` of the bar's height, so the footer and focused elements are never under
+  it. There is one list in the DOM: the body node moves into the sheet on open and back on close. Escape and "Close
+  alerts" return focus to the peek bar.
+- **Selecting a row** (DESIGN §7): it closes the sheet on phones and switches List to Map. If the station is in
+  another region it `await`s `setRegion()` before selecting, because a region change hides the details. It turns
+  "Show only problems" off if that would hide the station. Then `select(id, {focus: true})` focuses the marker and
+  opens the tooltip (≥ 600 px) or the station sheet. The document click handler that closes the tooltip on outside
+  clicks now treats `.alert-row` and the alerts sheet as inside; otherwise the tooltip closed right after opening.
+- **In-place refresh and focus:** rows are keyed by `episode_id`. Text changes only when it differs, and a row moves
+  only when it is out of place. Rows leaving a list are taken out first, so a resolved alert moves once instead of
+  shifting every row after it. An alert that resolves moves to the resolved list as the same `<li>`/button. The
+  list.js safety net puts focus back on the same episode, or its nearest neighbour, with `preventScroll`, and the
+  body's `scrollTop` is kept.
+- **Announcements:** a visually hidden `aria-live="polite"` region inside the rail says "New alert: <name> is
+  empty." or "3 new alerts.". The first successful read only sets the baseline. Resolved alerts are not announced,
+  and nothing is ever assertive. The region stays rendered on phones: the rail's other children are hidden, not the
+  section.
+- **Replay mode (decision, DESIGN_BACKLOG #46):** the rail stays in place and shows "Alerts aren’t part of the
+  replay. Exit the replay to see live alerts.". Rows and badges are hidden, not destroyed, and the peek bar is hidden.
+  The baseline keeps updating silently, so Exit doesn't announce a burst. This agrees with the KPI tile. Hiding the
+  rail would re-flow the map. Replaying alerts would mean recomputing the pipeline's rule in the browser (§2), so
+  that waits for a replay format v2.
+- **Read timeouts:** a shared `readJson(url, {timeoutMs})` in `web/js/util/read.js` uses `AbortController` and
+  `setTimeout`, with `clearTimeout` in `finally` after the body. `loadAlerts()` uses it with a **10 s** timeout: it
+  reads at start (independently of `live.json`) and after every live poll, and an older read never overwrites a
+  newer one. `loadReplay()` uses **30 s**: the file can be ~1.5 MB, and 10 s would fail on links slower than about
+  1.2 Mbps. On timeout the existing "The replay couldn’t be loaded. Try again later." shows and `aria-disabled` is
+  cleared. `freshness.js` `fetchLive()` is unchanged.
+- **Tests:** `tests/web/alerts.spec.js` (13: order, copy and durations, desktop / tablet / phone layout, selection
+  on desktop and phone, focus across refresh, announcements, replay note, 503 + Retry, a read that never answers,
+  axe on rail / card / peek / sheet in both themes). In `replay.spec.js`, "Replay a day shows a message when
+  replay.json never answers". The touch scan now also covers the 81 rail rows at 1280 px, and at 390 px the peek bar
+  plus every row and "Close alerts" in the open sheet; in replay mode it checks that the peek bar and rows are gone.
+  Variants are `structuredClone`s of the fixture.
+- **Docs:** CURRENT_STATE now says the keep-alive test server *reduces* (doesn't remove) cause (a) of the old shell
+  flake; the read timeout removes cause (b). DESIGN_BACKLOG #46–#51 were added, and #34, #39 and #44 updated.
+  IMPLEMENTATION_PLAN F3 is ticked.
+
+**Decided**
+- The desktop rail is capped at `max(20rem, 100dvh − nav − gap − section padding − 10rem)`, not
+  `100dvh − nav − 2 × gap`. At 1440 × 900 the full-height rail (804 px) was taller than the map card (~680 px), so
+  sticky had no room and the rail's top slid under the nav at the end of the page. Capped, it stays whole under the
+  nav from the top of the map to the footer (DESIGN_BACKLOG #49).
+- Durations keep counting with the page clock while data is paused, like the list and details (DESIGN_BACKLOG #50).
+- Marker `aria-describedby` (#44) stays deferred.
+
+**Surprises**
+- The station sheet and the alerts sheet share `is-scroll-locked`. A dialog's `close` event fires a task later, so
+  the alerts sheet removes the lock only when no other `dialog.sheet` is open; otherwise selecting a row on a phone
+  could unlock scrolling under the station sheet.
+- `@container (min-width: 40rem)` measures the section, so the tablet card turns two-column from about 720 px
+  viewports, not exactly at 768 px. The tests check 650 px (one column) and 900 px (two).
+
+**Results**
+- Playwright 49/49 (shell 11, live map 14, touch targets 3, replay 8, alerts 13). The alerts file `--repeat-each 3`:
+  39/39. The focus test `--repeat-each 5`: 5/5. The shell suite `--repeat-each 5`: 55/55. The focus and timeout tests
+  fail when their fix is removed: no focus safety net, and no alerts read timeout.

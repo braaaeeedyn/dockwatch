@@ -1,7 +1,7 @@
 // Touch targets (DESIGN.md §8, v1.0.1): on a coarse pointer, the List view's sort buttons and station-name buttons
 // are hit areas of at least 44 x 44 px. Checked by hit-testing points around each button, not only by its box.
 import { expect, test } from "@playwright/test";
-import { LIVE, prepare } from "./helpers.js";
+import { LIVE, loadFixture, prepare } from "./helpers.js";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -178,6 +178,8 @@ function expectNoMisses(result, state) {
 const count = (result, test) => result.scanned.filter(test).length;
 const footerLinks = (result) => count(result, (s) => s.footer);
 const NAV = ["Live", "Insights", "Pipeline", "About"];
+const ALERTS = loadFixture("alerts.json");
+const ALERT_ROWS = ALERTS.open.length + Math.min(ALERTS.resolved.length, 20); // the rail shows up to 20 resolved
 
 async function checkAllPages(page, width) {
   const sfStations = LIVE.stations.filter((s) => s.view === "sf").length;
@@ -189,6 +191,7 @@ async function checkAllPages(page, width) {
 
   // Live, map view, data paused: the banner with Replay a day.
   await expect(page.getByRole("button", { name: "Replay a day" })).toBeVisible();
+  await expect(page.locator("[data-alerts-peek]")).not.toHaveAttribute("aria-disabled", "true"); // alerts are in
   let result = await scan(page);
   expectNoMisses(result, `Live, paused, ${width} px`);
   expect(footerLinks(result)).toBeGreaterThanOrEqual(3);
@@ -199,12 +202,31 @@ async function checkAllPages(page, width) {
   expect(result.markers).toBeGreaterThan(0);
   if (width >= 1120) expect(count(result, (s) => NAV.includes(s.text))).toBe(4); // inline nav links
 
+  // The alerts rail (F3): every row beside or under the map; on a phone the peek bar, then every row in the sheet.
+  if (width >= 600) {
+    expect(count(result, (s) => /alert-row/.test(s.kind))).toBe(ALERT_ROWS);
+    expect(count(result, (s) => /alerts-peek/.test(s.kind))).toBe(0);
+  } else {
+    expect(count(result, (s) => /alerts-peek/.test(s.kind))).toBe(1);
+    expect(count(result, (s) => /alert-row/.test(s.kind))).toBe(0); // the rail's rows live in the sheet on phones
+    await page.locator("[data-alerts-peek]").click();
+    await expect(page.locator("[data-alerts-sheet]")).toBeVisible();
+    result = await scan(page, { scope: "[data-alerts-sheet]" });
+    expectNoMisses(result, `Live, alerts sheet open, ${width} px`);
+    expect(count(result, (s) => /alert-row/.test(s.kind))).toBe(ALERT_ROWS);
+    expect(count(result, (s) => s.text === "Close alerts")).toBe(1);
+    await page.getByRole("button", { name: "Close alerts" }).click();
+    await expect(page.locator("[data-alerts-sheet]")).toBeHidden();
+  }
+
   // Live in replay mode: Exit.
   await page.getByRole("button", { name: "Replay a day" }).click();
   await expect(page.getByRole("button", { name: "Exit" })).toBeFocused();
   result = await scan(page);
   expectNoMisses(result, `Live, replay mode, ${width} px`);
   expect(count(result, (s) => s.text === "Exit")).toBe(1);
+  expect(count(result, (s) => /alerts-peek/.test(s.kind))).toBe(0); // hidden in replay mode: nothing to open
+  expect(count(result, (s) => /alert-row/.test(s.kind))).toBe(0); // the rail shows its replay note instead
   await page.getByRole("button", { name: "Exit" }).click();
 
   // Live, list view: every sort button and every station button of the default region.

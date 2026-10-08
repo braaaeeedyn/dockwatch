@@ -284,8 +284,14 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
   the public feed for the same snapshot (DEVLOG 2026-10-08). The alerts rail is F3.
 
 ### F3 · Alerts feed (week 3)
-- [ ] Alert rail beside the map on desktop, below it on tablet, a bottom sheet on phones: open alerts first, newest
-      resolved below; tapping an alert focuses the station on the map.
+- [x] Alert rail beside the map on desktop, below it on tablet, a bottom sheet on phones: open alerts first, newest
+      resolved below; tapping an alert focuses the station on the map. *(2026-10-08: `web/js/live/alerts.js`; sticky
+      rail ≥ 1120 px, card under the map 600–1119 px (two columns of rows from a 40rem container), peek bar + alerts
+      sheet on phones; selecting a row switches region, focuses the marker and opens its details; new alerts are
+      announced politely; in replay mode the rail shows a note instead. The rail re-reads `alerts.json` with every
+      60 s `live.json` poll and the exporter writes it every 60 s, so an alert reaches the page within about 2 min of
+      the exporter seeing it. The end-to-end "Done when" below, with the stream running, is checked by hand, not by
+      the loop's automated checks.)*
 - **Done when:** an alert raised by the stream appears within 2 minutes and resolves on its own.
 
 ### F4 · Insights (weeks 5–6) and F4b · Pipeline health (week 7)

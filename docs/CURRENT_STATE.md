@@ -7,7 +7,7 @@
 
 **Last updated:** 2026-10-08 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
 partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
-44 px touch targets everywhere) · F5 "Replay a day" ✅ · DESIGN.md v1.0.1
+44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · DESIGN.md v1.0.1
 
 ---
 
@@ -15,9 +15,24 @@ partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-ta
 
 | What | Why | Status |
 |---|---|---|
-| Nothing in progress | "Pipeline off" is now a first-class state with Replay a day, and every pressable is ≥ 44 px on touch. | Next: F3 (alerts rail). |
+| Nothing in progress | The Live page now has its alerts rail (F3). | Next: CI, then M3 (ops DB + Debezium CDC). |
 
-Done most recently: **the paused state and Replay a day** (suggestions H1 and H3 of the run-2 review).
+Done most recently: **F3, the alerts rail** (`web/js/live/alerts.js`; see *Website* below).
+- **Rail per breakpoint:** from 1120 px the Live page is two columns, the map (≈ 2/3) and a sticky alerts rail
+  (≈ 1/3) whose rows scroll inside it. From 600 to 1119 px the rail is a card under the map; its body scrolls inside
+  (`min(36rem, 70dvh)`), and a container query gives two columns of rows in the wide card. Below 600 px a **peek bar**
+  fixed to the bottom ("61 open alerts") opens the **alerts sheet**, a bottom-sheet dialog holding the same list.
+- **Rows:** open alerts longest-running first, then up to 20 recently resolved, each with a state marker, the name,
+  "Empty for 34 min" / "Full, resolved after 22 min", and "San Francisco · started 3:32 PM". Selecting a row switches
+  to the Map view and to the station's region if needed, focuses its marker and opens its details. Rows are keyed by
+  `episode_id` and updated in place, so focus and scroll survive the 60 s refresh. New open alerts are announced
+  politely ("New alert: … is empty." / "3 new alerts."), never on first load.
+- **Replay mode:** the rail shows a note ("Alerts aren’t part of the replay. Exit the replay to see live alerts.")
+  and the phone peek bar is hidden; the rows come back on Exit.
+- **Read timeouts:** `alerts.json` is read with a 10 s timeout (then the rail's error message + Retry), and
+  `replay.json` with 30 s (then "The replay couldn’t be loaded. Try again later." and the button works again).
+
+Before that: **the paused state and Replay a day** (suggestions H1 and H3 of the run-2 review).
 - **Paused banner:** keeps DESIGN §6's sentence ("Live data paused — showing the state at 3:42 PM.", with "on Oct 6"
   when the data is from an earlier Pacific day) and adds why and what next: "The DockWatch pipeline isn’t running
   right now, so no new station data is coming in; the map updates on its own when it restarts." The pill, the banner
@@ -61,7 +76,7 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next loop: **F3** (alerts rail beside the map), then CI and M3 (ops DB + Debezium CDC).
+Next loop: CI (ruff, host pytest, Playwright), then M3 (ops DB + Debezium CDC).
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -115,7 +130,7 @@ raw archive (one Pacific day = two UTC dt= partitions) ──(python tasks.py re
 | `DOCKWATCH_PLAN.md` | The original project plan (what and why). Unchanged. |
 | `IMPLEMENTATION_PLAN.md` | Milestones M0–M7 / F1–F5, decisions (incl. M2 decisions), progress checkboxes. |
 | `DESIGN.md` | DockWatch design system **v1.0.1**, frozen until launch (F5); v1.0.1 = accessibility fix (44 px touch targets in the list table). |
-| `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop); #35 (touch targets) is resolved. |
+| `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop, 6 from F3: #46–#51); #35 (touch targets) is resolved. |
 | `CONCEPTS.md` | Kafka, stream processing and Iceberg explained through this codebase. |
 | `reference/DESIGN_SOURCE_transitpulse.md` | The TransitPulse design file that was here before; reference only. |
 | `CURRENT_STATE.md` / `DEVLOG.md` | This file / append-only history. |
@@ -175,15 +190,17 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 ### Website (`web/`), static, no build step
 | Path | What it is |
 |---|---|
-| `index.html` (Live), `insights.html`, `pipeline.html`, `about.html` | Shared shell: skip link, sticky 56 px nav (wordmark, links, freshness pill, theme toggle), full-screen nav overlay below 1120 px, footer with Bay Wheels attribution, "Not affiliated with Lyft or Bay Wheels", GitHub link, "Data through <date>". Live = title + freshness pill, paused banner (with "Replay a day" when `data/replay.json` exists) and the replay banner, KPI tiles, the map card at `#map` (F2); Insights / Pipeline show "Arrives with M4 / M5" empty states; About has sources and licences. On touch (`pointer: coarse`) every button and link is a ≥ 44 × 44 px hit area (footer links 44 px tall; icon buttons keep their corners via a square `::after`); in-sentence links in About's text are the WCAG inline exception. |
-| `css/tokens.css`, `base.css`, `layout.css`, `components.css`, `map.css` | Tokens from the DESIGN.md front matter (light default; dark via `prefers-color-scheme` or the toggle's `data-theme`); `@font-face`, reset, focus ring, reduced motion; page frame; components (incl. stat tile, segmented control, chip, banner, skeleton, data table with 44 px touch targets, details, bottom sheet); the map card, markers, tooltip and legend. |
+| `index.html` (Live), `insights.html`, `pipeline.html`, `about.html` | Shared shell: skip link, sticky 56 px nav (wordmark, links, freshness pill, theme toggle), full-screen nav overlay below 1120 px, footer with Bay Wheels attribution, "Not affiliated with Lyft or Bay Wheels", GitHub link, "Data through <date>". Live = title + freshness pill, paused banner (with "Replay a day" when `data/replay.json` exists) and the replay banner, KPI tiles, the map card at `#map` (F2) and the alerts rail `[data-alerts-rail]` beside it (F3), plus the phone peek bar after `.live-layout` and the alerts sheet `[data-alerts-sheet]`; Insights / Pipeline show "Arrives with M4 / M5" empty states; About has sources and licences. On touch (`pointer: coarse`) every button and link is a ≥ 44 × 44 px hit area (footer links 44 px tall; icon buttons keep their corners via a square `::after`); in-sentence links in About's text are the WCAG inline exception. |
+| `css/tokens.css`, `base.css`, `layout.css`, `components.css`, `map.css` | Tokens from the DESIGN.md front matter (light default; dark via `prefers-color-scheme` or the toggle's `data-theme`); `@font-face`, reset, focus ring, reduced motion; page frame; components (incl. stat tile, segmented control, chip, banner, skeleton, data table with 44 px touch targets, details, bottom sheet, and the alerts rail / alert row / peek bar / alerts sheet with the alert row's container query); the map card, markers, tooltip and legend, and `.live-layout`'s two columns from 1120 px. |
 | `js/main.js`, `insights.js`, `pipeline.js`, `about.js` | One ES-module entry per page; each calls `shell.js` (`theme.js`, `nav.js`, `freshness.js`, `util/time.js`). `freshness.js` is the page's only `live.json` poll (60 s; a read that hasn't answered in 10 s is aborted and counts as failed, so the pill says "Paused · No data yet" instead of staying on "Loading…", and Live shows its error with Retry) and broadcasts each result as a `dockwatch:live` event (or `dockwatch:live-error`); every pill render (15 s tick and each refresh) also broadcasts `dockwatch:freshness` with the state, so the Live banner flips with the pill. On pages without the banner it adds a visually hidden `aria-live="polite"` region that announces only transitions: "Live data paused — showing the state at 3:42 PM." and "Live data is back." "Data as of" carries the date when the data is from an earlier Pacific day. |
-| `js/live/live.js` + `states.js`, `kpis.js`, `list.js`, `details.js`, `replay.js` | Live page controller: region (remembered in `localStorage`, mirrored in the URL with `view` and `problems`), `Map | List`, "Show only problems" (every state except `ok`), legend counts from `live.json` `counts[view]`, polite `aria-live` summary only when counts change, paused banner (`freshnessState(generated_at) === "paused"`, > 5 min) with the reason sentence and "Replay a day", skeleton / error (Retry) / empty states; KPI tiles; the sortable list table (rows updated in place by station id, so focus and scroll survive a refresh); tooltip (≥ 600 px) or bottom sheet (phones). `alerts.json` is re-read with each refresh. **Replay mode** (`replay.js`): `HEAD data/replay.json` once when the banner first shows (no button if it's missing); on click it fetches the file, decodes frames incrementally into `live.json`-shaped stations (`state_since` / `last_reported` null, "—" in the list, "Replay, state at 7:35 PM" in details) and steps one frame every `step_s × 1000 / 10` ms with `setInterval`, looping at the end. Focus moves to Exit, and back to "Replay a day" on Exit; Escape does not exit. KPI tiles show the frame's Empty / Full / Bikes, Open alerts "—" ("Alerts aren’t part of the replay") and a caption naming the replayed day. Live refreshes during replay update the pill only. Not in the URL. |
+| `js/live/live.js` + `states.js`, `kpis.js`, `list.js`, `details.js`, `replay.js` | Live page controller: region (remembered in `localStorage`, mirrored in the URL with `view` and `problems`), `Map | List`, "Show only problems" (every state except `ok`), legend counts from `live.json` `counts[view]`, polite `aria-live` summary only when counts change, paused banner (`freshnessState(generated_at) === "paused"`, > 5 min) with the reason sentence and "Replay a day", skeleton / error (Retry) / empty states; KPI tiles; the sortable list table (rows updated in place by station id, so focus and scroll survive a refresh); tooltip (≥ 600 px) or bottom sheet (phones). `alerts.json` is read at start (independently of `live.json`) and re-read with each refresh, with a 10 s read timeout; an older read never overwrites a newer one. **Replay mode** (`replay.js`): `HEAD data/replay.json` once when the banner first shows (no button if it's missing); on click it fetches the file (30 s read timeout; then the banner says "The replay couldn’t be loaded. Try again later." and the button can be pressed again), decodes frames incrementally into `live.json`-shaped stations (`state_since` / `last_reported` null, "—" in the list, "Replay, state at 7:35 PM" in details) and steps one frame every `step_s × 1000 / 10` ms with `setInterval`, looping at the end. Focus moves to Exit, and back to "Replay a day" on Exit; Escape does not exit. KPI tiles show the frame's Empty / Full / Bikes, Open alerts "—" ("Alerts aren’t part of the replay") and a caption naming the replayed day. Live refreshes during replay update the pill only; the alerts rail shows its replay note. Not in the URL. |
+| `js/live/alerts.js` | The alerts rail (F3): "Open now" (count badge, open alerts by `started`, longest-running first) and "Recently resolved" (by `resolved`, newest first, at most 20); stable sorts. Each row is a `button.alert-row` (`data-episode`, `data-alert-station`): a 12 px state marker, the name (`translate="no"`), "Empty for 34 min" (page clock, counting on with the 15 s tick, also while paused) or "Empty, resolved after 22 min", and "San Francisco · started 3:32 PM" (date added when not today, Pacific). Stations missing from `live.json` get a static `div`. Rows are keyed by `episode_id` and updated in place: text changes only when it differs, rows move only when out of place, a resolving alert moves to the resolved list as the same node, focus goes back to the same episode (or its neighbour) and the body's scroll is kept. States: skeleton rows + `aria-busy` while loading, "No open alerts right now.", "Alerts couldn’t be loaded. Check your connection, then try again." + Retry (only when there is no earlier copy), and the replay note. Desktop (≥ 1120 px): sticky rail under the nav, rows scroll inside, height capped to fit between the nav and the footer. Tablet (600–1119 px): card under the map, body scrolls inside, `@container (min-width: 40rem)` → two columns. Phone: the section isn't shown; the **peek bar** ("61 open alerts" / "1 open alert" / "No open alerts" / "Loading alerts…" / "Alerts couldn’t be loaded"; hidden in replay) opens the alerts sheet (`showModal()`, `is-scroll-locked`), into which the one list body moves; Escape / "Close alerts" return focus to the peek bar; the page gets bottom padding and `scroll-padding-bottom` for the bar. Selecting a row: closes the sheet on phones, switches List → Map, awaits `setRegion()` if the station is in another region, turns "Show only problems" off if needed, then focuses the marker and opens its details. A visually hidden `aria-live="polite"` region in the rail announces new open alerts ("New alert: … is empty." / "3 new alerts."), never on the first read or during replay. |
+| `js/util/read.js` | `readJson(url, {timeoutMs})`: `fetch` + JSON with an `AbortController` read timeout (`setTimeout`, cleared in `finally` after the body, so the tests' fake clock drives it). Used by `loadAlerts()` (10 s) and `loadReplay()` (30 s); `freshness.js` keeps its own proven copy for `live.json`. |
 | `js/map/map.js` | SVG map: land + landmarks, one `<circle>` per station keyed by id and updated in place (fill cross-fade + one pulse on a state change, none under reduced motion and none in replay mode), tier groups for draw order, screen-pixel sizes via `--u` / `--r-ok` from a `ResizeObserver`, nearest-station hit testing (10 px pointer, 22 px touch), roving tabindex with arrow keys. No wheel/pinch handling. |
 | `fonts/` | IBM Plex Sans 400/500/600 + Mono 400/500, Latin `woff2`, and `OFL.txt`. |
 | `licenses/lucide-LICENSE.txt` | Licence for the inline Lucide v1.52.0 icons (sun, moon, menu, x, info, triangle-alert, history, chevrons-up-down, arrow-up, arrow-down). |
 | `data/replay.json` | Written by hand with `python tasks.py replay-export` (git-ignored, like `live.json`); read only when a visitor presses "Replay a day". The real build of 2026-10-07 (archive starts ~3 PM Pacific): 401,833 bytes, 641 stations, 492 one-minute frames; budget 1.5 MB per full day. |
-| `data/live.json`, `data/alerts.json` | Written by the exporter (git-ignored). The freshness pill reads `generated_at` from `live.json` (time of the last export with new data): Live < 2 min, Delayed 2–5, Paused > 5. The map, legend, list and KPI tiles read the stations, `counts` and `bikes_available`; the Open alerts tile reads `alerts.json` `open`. |
+| `data/live.json`, `data/alerts.json` | Written by the exporter (git-ignored). The freshness pill reads `generated_at` from `live.json` (time of the last export with new data): Live < 2 min, Delayed 2–5, Paused > 5. The map, legend, list and KPI tiles read the stations, `counts` and `bikes_available`; the Open alerts tile and the alerts rail read `alerts.json` (`open`, `resolved`). |
 | `geo/sf.json`, `eastbay.json`, `sj.json` | Map shapes per region view from `python tasks.py geo` (committed): projection params, `0 0 1000 1000` view box, simplified land paths, 3–4 landmarks. Drawn by `js/map/map.js`. |
 | `js/map/project.js` | lon/lat → view box with a view's projection; mirrors `dockwatch.geo.build.project` (stations are projected in the browser). |
 
@@ -217,12 +234,21 @@ Remote state backend commented out until the AWS account exists.
   refresh, KPI tiles, error + Retry, axe with tooltip / list / sheet open, list keeps focus across a refresh).
   `tests/web/touch-targets.spec.js`: 3 pass (touch emulation, `pointer: coarse` asserted): the list test, plus every
   button, link, segmented label and summary on all four pages at 390 and 1280 px (paused banner, replay mode, list
-  view with every sort and station button, phone sheet, nav overlay, Insights, Pipeline, About, focused skip link).
+  view with every sort and station button, phone sheet, nav overlay, Insights, Pipeline, About, focused skip link;
+  the 81 alert rows at 1280 px, and at 390 px the peek bar plus every row and "Close alerts" in the open alerts sheet).
   Each is hit-tested at its centre, ±21 px and the corners of a 44 × 44 px square; only About's in-sentence links
   and map markers (22 px nearest-station radius) are exempt, and the test checks the exemptions.
-  `tests/web/replay.spec.js`: 7 pass (banner says why and offers Replay a day; names the day for older data; no button
+  `tests/web/replay.spec.js`: 8 pass (banner says why and offers Replay a day; names the day for older data; no button
   without a file; plays frames 0 and 1 of the fixture at 10×; Exit restores live data and focus; no announcement per
-  frame; axe on both banners at 390 / 1440 px, light and dark). 35 Playwright tests in total. Tests route
+  frame; axe on both banners at 390 / 1440 px, light and dark; `replay.json` that never answers ends in the message
+  after 30 s).
+  `tests/web/alerts.spec.js`: 13 pass (open alerts longest-running first then up to 20 resolved; row copy, start line
+  and durations moving with the clock; sticky rail beside the map at 1440 px with rows scrolling inside; card under
+  the map with two columns at 900 px and one at 650 px; phone peek bar that doesn't cover the footer and opens the
+  alerts sheet; selecting a row switches region, focuses the marker and opens the tooltip, or the station sheet on a
+  phone; focus stays on the same alert across refreshes, also when it resolves; polite announcements, none on first
+  load; replay note and hidden peek bar; 503 + Retry; a read that never answers ends in the error after 10 s; axe on
+  the rail, card, peek bar and sheet in both themes). 49 Playwright tests in total. Tests route
   `data/*.json` to `tests/web/fixtures/` (a real 641-station export, and `replay.json` built from the real archive
   with `--step 600`, 51 frames) and fake time with `page.clock`; `data/replay.json` is a 404 unless a test asks for
   the fixture.
@@ -233,11 +259,14 @@ Remote state backend commented out until the AWS account exists.
 
 ## Known gaps and facts to remember
 - Git: commits are made at the end of each loop, not by tooling during it (latest at the start of this loop:
-  `4492d42`, F1 + F2).
+  `2b443eb`, the paused state, Replay a day and 44 px touch targets).
 - An unused Docker volume `dockwatch_iceberg-catalog` (old SQLite catalog) still exists; backup copy at
   `data/iceberg_catalog_backup.db`. The Postgres catalog is verified, so the volume can be deleted (left to the user).
-- The Live page has no alerts rail yet (F3, next loop): on desktop the map spans the content width;
-  `.live-layout` in `web/index.html` / `css/map.css` is where the rail's column goes.
+- **Alerts reach the page within about 2 min** of the exporter seeing them (the exporter writes `alerts.json` every
+  60 s and the rail re-reads it with every 60 s `live.json` poll). The end-to-end check with the stream running (an
+  alert raised by Spark appears and resolves on its own) is done by hand, not by the automated checks.
+- The alerts rail is not filtered by region and has no history in replay mode (`replay.json` v1 has no episodes;
+  DESIGN_BACKLOG #46).
 - **Replay file refresh is manual:** `web/data/replay.json` changes only when someone runs
   `python tasks.py replay-export` (no schedule, not published to AWS yet). The archive starts on 2026-10-07 ~3 PM
   Pacific, so the default day (Oct 7) is partial; the replay starts at its first archived frame. A day at 10× takes
@@ -247,8 +276,9 @@ Remote state backend commented out until the AWS account exists.
   budget holds up to ~84. A full real day is ~1 MB. If real days approach the cap: a larger default `--step`, or a
   compact v2 encoding / gzip.
 - **Shell-suite flake (not reproduced):** once, after the Spark-in-Docker checks, the nav pill stayed "loading" for
-  5 s in `shell.spec.js`. Not reproduced since in ~180 runs after `test-spark` (see DEVLOG); the live.json read
-  timeout and the keep-alive test server remove the two likely causes, and a recurrence now names its cause.
+  5 s in `shell.spec.js`. Not reproduced since in ~180 runs after `test-spark` (see DEVLOG). Of the two likely causes,
+  the live.json read timeout removes cause (b), a first read that never settles; the keep-alive test server reduces
+  (does not remove) cause (a), a module request failing under load; a recurrence now names its cause.
 - The paused state can't tell "Spark stopped" from "the whole laptop is off": both mean "the pipeline isn't running"
   to a visitor. An exporter heartbeat would need a supervised exporter (out of scope).
 - Docker Compose warns that volume `dockwatch_checkpoints` "already exists but was not created by Docker Compose";

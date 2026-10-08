@@ -247,3 +247,35 @@ test("axe finds no violations in the paused and replay banners", async ({ page }
     }
   }
 });
+
+test("Replay a day shows a message when replay.json never answers", async ({ page }) => {
+  await prepare(page, { ageMs: PAUSED_MS, replay: true });
+  // The file is published (HEAD answers 200), but the GET is never answered: the request stays pending.
+  await page.route("**/data/replay.json", (route) =>
+    route.request().method() === "HEAD" ? route.fulfill({ status: 200, body: "" }) : undefined,
+  );
+  await page.goto("/index.html");
+  await expect(page.locator("#map")).not.toHaveClass(/is-loading/);
+  await expect(banner(page)).toBeVisible();
+  // Record whether the replay banner ever shows.
+  await page.evaluate(() => {
+    const el = document.querySelector("[data-replay-banner]");
+    window.replayBannerShown = !el.hidden;
+    new MutationObserver(() => {
+      if (!el.hidden) window.replayBannerShown = true;
+    }).observe(el, { attributes: true });
+  });
+
+  const asked = page.waitForRequest((request) => request.url().includes("data/replay.json") && request.method() === "GET");
+  await replayButton(page).click();
+  await asked;
+  await expect(replayButton(page)).toHaveAttribute("aria-disabled", "true");
+
+  // The read gives up after 30 s: the message shows and the button can be pressed again.
+  await page.clock.fastForward(30_000);
+  await expect(banner(page).locator("[data-replay-error]")).toHaveText("The replay couldn’t be loaded. Try again later.");
+  await expect(banner(page).getByText("The replay couldn’t be loaded. Try again later.")).toBeVisible();
+  await expect(replayButton(page)).not.toHaveAttribute("aria-disabled");
+  await expect(replayBanner(page)).toBeHidden();
+  expect(await page.evaluate(() => window.replayBannerShown)).toBe(false);
+});
