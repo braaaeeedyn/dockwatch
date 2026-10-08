@@ -1,5 +1,8 @@
 """Exporter: keep the latest station state, station information and alerts from Kafka in memory, and write
 web/data/live.json + alerts.json every minute. Run: python tasks.py export
+
+`generated_at` is the time of the last export with new data: when `data_as_of` has not moved since the last
+written live.json (also across restarts), the files are not rewritten and the site goes Delayed -> Paused.
 """
 
 import json
@@ -12,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from dockwatch.config import get_settings
-from dockwatch.exporter.build import build_alerts, build_live
+from dockwatch.exporter.build import build_alerts, build_live, carry_generated_at, has_new_data
 
 log = logging.getLogger("dockwatch.exporter")
 
@@ -24,6 +27,15 @@ def write_json(path: Path, doc: dict) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(doc, f, separators=(",", ":"))
     os.replace(tmp, path)
+
+
+def read_previous(path: Path) -> dict | None:
+    """The previously written export, or None if it is missing or not a valid JSON object."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 def main() -> None:
@@ -53,6 +65,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
+    previous = read_previous(out / "live.json")  # survives restarts: keep its generated_at if no new data
     next_write = time.time() + 5  # first write soon after catching up
     while not stop["flag"]:
         for msg in consumer.consume(num_messages=1000, timeout=1.0):
@@ -61,9 +74,14 @@ def main() -> None:
             target[msg.topic()][msg.key().decode()] = json.loads(msg.value())
         if time.time() >= next_write:
             now = time.time()
-            write_json(out / "live.json", build_live(states, infos, now))
-            write_json(out / "alerts.json", build_alerts(alerts, infos, now))
-            log.info("wrote %d stations, %d alerts", len(states), len(alerts))
+            live = carry_generated_at(build_live(states, infos, now), previous)
+            if has_new_data(live, previous):
+                write_json(out / "live.json", live)
+                write_json(out / "alerts.json", build_alerts(alerts, infos, now, live["generated_at"]))
+                log.info("wrote %d stations, %d alerts", len(states), len(alerts))
+                previous = live
+            else:
+                log.info("no new data since %s, not rewriting", previous.get("data_as_of"))
             next_write = now + s.export_interval_s
     consumer.close()
 

@@ -272,7 +272,7 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
 
 ### F2 · Live station map (weeks 2–3)
 - [x] Build step (Python, run once): TIGER land/water → simplified SVG paths per region, projected to each region's
-      `viewBox`; station positions projected the same way → `web/geo/*.json`.
+      `viewBox`; station positions projected the same way → `web/geo/*.json` (see §0: projected in browser).
 - [x] Map: SVG land + station markers coloured by state (`DESIGN.md §6`), region segmented control, `List` view
       (sortable table) as the text alternative, legend with counts per state.
 - [x] Station tooltip/sheet: name, code, bikes (e-bikes), docks, state, "empty for 34 min", last reported.

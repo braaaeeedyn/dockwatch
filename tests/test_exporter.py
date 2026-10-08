@@ -1,4 +1,5 @@
-from dockwatch.exporter.build import build_alerts, build_live, view_for
+from dockwatch.exporter.__main__ import read_previous, write_json
+from dockwatch.exporter.build import build_alerts, build_live, carry_generated_at, has_new_data, view_for
 
 INFOS = {
     "a": {"name": "Market St", "short_name": "SF-1", "lat": 37.79, "lon": -122.40, "region_id": "3", "capacity": 20},
@@ -65,3 +66,48 @@ def test_alerts_split_open_and_resolved():
     assert [r["station_id"] for r in doc["open"]] == ["b"]
     assert doc["resolved"][0]["duration_s"] == 1500
     assert doc["open"][0]["name"] == "Lake Merritt"
+
+
+def test_generated_at_does_not_advance_without_new_data():
+    states = {"a": _state("a", "ok", 8), "b": _state("b", "empty", 0, snap=1060)}
+    first = carry_generated_at(build_live(states, INFOS, now=1100), None)
+    second = carry_generated_at(build_live(states, INFOS, now=1400), first)
+    assert first["generated_at"] == "1970-01-01T00:18:20Z"
+    assert second["generated_at"] == first["generated_at"]
+    assert not has_new_data(second, first)  # nothing new: the exporter does not rewrite the files
+    alerts = build_alerts({}, INFOS, now=1400, generated_at=second["generated_at"])
+    assert alerts["generated_at"] == first["generated_at"]  # live.json and alerts.json never disagree
+
+
+def test_generated_at_advances_when_data_as_of_moves():
+    first = carry_generated_at(build_live({"a": _state("a", "ok", 8)}, INFOS, now=1100), None)
+    moved = {"a": _state("a", "ok", 7, snap=1360)}
+    second = carry_generated_at(build_live(moved, INFOS, now=1400), first)
+    assert second["data_as_of"] == "1970-01-01T00:22:40Z"
+    assert second["generated_at"] == "1970-01-01T00:23:20Z"
+    assert has_new_data(second, first)
+    assert has_new_data(first, None)  # first export after a clean start is always written
+
+
+def test_has_new_data_ignores_older_or_missing_data():
+    newer = build_live({"a": _state("a", "ok", 8, snap=2000)}, INFOS, now=2100)
+    older = build_live({"a": _state("a", "ok", 8, snap=1000)}, INFOS, now=2200)
+    assert not has_new_data(older, newer)  # still catching up after a restart: do not go backwards
+    assert not has_new_data(build_live({}, INFOS, now=2200), newer)
+    assert has_new_data(newer, {"generated_at": "x", "data_as_of": "garbage"})
+
+
+def test_generated_at_kept_from_previous_export_after_restart(tmp_path):
+    states = {"a": _state("a", "ok", 8)}
+    path = tmp_path / "live.json"
+    write_json(path, build_live(states, INFOS, now=1100))
+    previous = read_previous(path)
+    after_restart = carry_generated_at(build_live(states, INFOS, now=5000), previous)
+    assert after_restart["generated_at"] == "1970-01-01T00:18:20Z"
+    assert not has_new_data(after_restart, previous)
+
+    assert read_previous(tmp_path / "missing.json") is None
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("{not json", encoding="utf-8")
+    assert read_previous(garbage) is None
+    assert carry_generated_at(build_live(states, INFOS, now=5000), None)["generated_at"] == "1970-01-01T01:23:20Z"

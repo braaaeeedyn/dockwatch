@@ -397,3 +397,58 @@ test("axe finds no violations on the live page with the list, details and sheet 
     await check("phone sheet");
   }
 });
+
+test("list keeps focus on the same station across a refresh", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  let served = LIVE;
+  await prepare(page);
+  await page.route("**/data/live.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(served) }),
+  );
+  await page.goto("/index.html?view=list");
+  await expect(page.locator("#map")).not.toHaveClass(/is-loading/);
+  await expect(rows(page)).toHaveCount(inView("sf").length);
+
+  // A station in the middle of the list, so the wrapper can scroll above and below it.
+  const ids = await rows(page).evaluateAll((els) => els.map((el) => el.dataset.id));
+  const id = ids[Math.floor(ids.length / 2)];
+  const station = LIVE.stations.find((s) => s.id === id);
+  const row = page.locator(`[data-list-view] tbody tr[data-id="${id}"]`);
+  const button = row.locator("[data-show-station]");
+  await row.evaluate((el) => {
+    el.dataset.probe = "same-row";
+  });
+  await button.focus();
+  await expect(button).toBeFocused();
+  const wrap = page.locator(".table-wrap");
+  await wrap.evaluate((el) => {
+    el.scrollTop = Math.max(0, el.scrollTop - 40);
+    el.scrollLeft = 0;
+  });
+  const before = await wrap.evaluate((el) => ({ top: el.scrollTop, left: el.scrollLeft }));
+  expect(before.top).toBeGreaterThan(0);
+
+  // The next export: the focused station's bikes and docks change, and another station goes from empty to full
+  // (so rows above it move).
+  const next = structuredClone(LIVE);
+  next.generated_at = new Date(Date.parse(LIVE.generated_at) + 60_000).toISOString();
+  const mine = next.stations.find((s) => s.id === id);
+  const bikes = station.bikes > 0 ? station.bikes - 1 : station.bikes + 1;
+  const docks = station.docks > 0 ? station.docks - 1 : station.docks + 1;
+  Object.assign(mine, { bikes, docks });
+  const other = next.stations.find((s) => s.view === "sf" && s.state === "empty" && s.id !== id);
+  Object.assign(other, { state: "full", bikes: other.capacity, ebikes: 0, docks: 0 });
+  served = next;
+  await page.clock.fastForward(60_000);
+
+  await expect(row.locator("td:nth-of-type(3)")).toHaveText(number.format(bikes));
+  await expect(row.locator("td:nth-of-type(4)")).toHaveText(number.format(docks));
+  await expect(page.locator(`[data-list-view] tbody tr[data-id="${other.id}"] .state-word`)).toHaveText("Full");
+  await expect(button).toBeFocused();
+  await expect(page.locator('[data-probe="same-row"]')).toHaveAttribute("data-id", id);
+  await expect(rows(page)).toHaveCount(inView("sf").length);
+  const after = await wrap.evaluate((el) => ({ top: el.scrollTop, left: el.scrollLeft }));
+  expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.left - before.left)).toBeLessThanOrEqual(1);
+});

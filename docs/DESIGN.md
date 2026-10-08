@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.0.1
 status: frozen            # locked from the start of F1 until launch (F5 done). See "Change policy" at the end.
 name: DockWatch
 description: The design system for DockWatch, a real-time Bay Wheels station monitor and lakehouse demo. A calm, neutral operations console in light and dark themes, built on IBM Plex type and flat 10 px cards, where colour means only one thing — a station's availability state — so problem stations are the first thing the eye finds.
@@ -366,7 +366,8 @@ Tokens for each are in the front matter. Behaviour:
   of SF stations are empty"), the chart, and a `caption` source line ("Source: silver.availability_5m, last 30 days").
   Below 600 px card width: fewer ticks, legend under the chart.
 - **Data table:** wrapper scrolls horizontally inside its card; first column sticky; numbers right-aligned, tabular;
-  sortable headers are buttons with `aria-sort`.
+  sortable headers are buttons with `aria-sort`. On touch, header sort buttons and station-name buttons in the rows
+  are ≥ 44 px hit areas (§8); the name button's hit area covers its whole cell.
 - **Status badge:** icon + word in the status colour; used in the pipeline status banner, freshness table and
   data-quality table.
 - **Banner:** for stale data, pipeline incidents and "Replay mode — showing Tuesday 8 Oct, 10× speed [Exit]".
@@ -438,3 +439,6 @@ This document is **frozen at v1.0 from the start of F1** until public launch (F5
   language, Ask card / answer panel / SQL agent components, forecast components, ink Findings band. Added: Okabe–Ito
   station-state palette with size redundancy, offline state, heatmap ramps, pipeline status colours, dark theme,
   IBM Plex Sans/Mono, freshness pill, alert row, bottom sheet, banner, region-based station map, launch checklist.
+- **v1.0.1 (2026-10-08):** accessibility fix found in testing: the List view's header sort buttons (40 px) and
+  station-name buttons (24 px) were below the 44 px touch minimum of §8. They are now ≥ 44 × 44 px hit areas on touch
+  (`pointer: coarse`); the §7 Data table bullet says so. No token, colour or layout change; pointer-fine sizes unchanged.

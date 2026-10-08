@@ -427,3 +427,41 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
   that was not verified. The user was told in that iteration's build notes.
 - Since then: scripts pass Windows-style paths to Node, nothing outside the project or the session scratch folder
   is deleted, and a stray folder created by a tool is left in place and reported instead.
+
+## 2026-10-08 · F2 fixes · honest freshness, list focus across refresh, 44 px touch targets
+**Did**
+- **F-1 freshness (exporter):** `generated_at` in `live.json` / `alerts.json` now means "time of the last export
+  that had new data". `build.py` got two pure helpers: `carry_generated_at(live, previous)` keeps the previous
+  `generated_at` when the previous export has the same non-null `data_as_of`, and `has_new_data(live, previous)` says
+  whether to write (no previous export, or `data_as_of` moved forward; an older `data_as_of` while catching up after a
+  restart is not written). `__main__.py` reads the previous `live.json` at start (`read_previous`: missing or invalid
+  JSON → None), so the rule survives exporter restarts, and skips rewriting both files when there is no new data
+  (INFO log "no new data since …, not rewriting"). `alerts.json` gets the live doc's `generated_at`. With Spark
+  stopped, the site now goes Delayed → Paused and shows the stale banner; the site's 2 / 5 min thresholds and
+  DESIGN wording are unchanged. Four new host tests in `tests/test_exporter.py` (46 pass, 1 skipped).
+- **F-2 list focus:** `web/js/live/list.js` no longer replaces `tbody.innerHTML` on every refresh. Rows are kept in
+  a `Map` keyed by station id; changed cells are updated in place (`textContent`, the state cell as escaped HTML),
+  new rows are created, gone rows removed, and only rows out of place are moved. Focus on a station-name button and
+  the wrapper's scroll position are remembered and restored (`focus({ preventScroll: true })`); if the focused
+  station left the list, focus goes to the next row, else the previous. Missing bikes/docks now show "—".
+  New Playwright test "list keeps focus on the same station across a refresh" (fails against the old `list.js`).
+- **Touch targets:** under `@media (pointer: coarse)` the list's sort buttons are 44 px tall, and station-name
+  buttons are 44 px tall `inline-flex` boxes whose `::before` covers the whole sticky name cell (the underlined text
+  looks the same; 4 px cell padding keeps the focus ring visible). Pointer-fine sizes unchanged. DESIGN.md is
+  **v1.0.1**: version bump, one sentence in the §7 Data table bullet, and a changelog entry (accessibility fix, as
+  its change policy allows). New `tests/web/touch-targets.spec.js` (390 px, `hasTouch` + `isMobile`): asserts
+  `(pointer: coarse)` really matches in Playwright's Chromium (it does), then hit-tests the centre, ±21 px and the
+  corners of a 44 × 44 px square around every sort button and the first 10 station buttons. It fails on the old CSS.
+- Docs: DESIGN_BACKLOG #2 rewritten (generated_at vs data_as_of), new #33 (pulse scales the marker, §5 says ring),
+  #34 (container queries only on the stat tile), #35 (other pressables under 44 px found by a scan: KPI ⓘ buttons
+  41 px wide, footer links 18–38 px tall). IMPLEMENTATION_PLAN F2 geo step points to §0 (projected in browser).
+
+**Tried and changed**
+- The first touch-test run failed on the Code sort button: centring a column in the wrapper put it under the sticky
+  Station column. The test now centres each column in the part of the wrapper the sticky column doesn't cover.
+- With 0 px cell padding the 44 px name button's focus ring (2 px + 2 px offset) was partly hidden by the
+  neighbouring rows; 4 px padding fixed it (rows are 52 px on touch).
+
+**Results**
+- ruff, ruff format, host pytest 46 passed / 1 skipped; Playwright 24/24 (shell 9, live map 14, touch targets 1);
+  the two new browser tests 10/10 with `--repeat-each=5`.

@@ -3,16 +3,17 @@
 > **What this file is:** gaps and judgment calls found while building the site against
 > [`DESIGN.md`](DESIGN.md) v1.0, which is **frozen** until launch (F5). Each entry says what DESIGN.md doesn't
 > cover (or where two parts disagree), what was built instead (the closest existing token or component), and what
-> v1.1 should decide. Nothing here changes DESIGN.md; only accessibility failures may, and none were found so far.
+> v1.1 should decide. Nothing here changes DESIGN.md; only accessibility failures may: one was found and fixed in
+> DESIGN.md v1.0.1 (44 px touch targets in the List view; see its changelog). Other small targets: #35.
 
-**Last updated:** 2026-10-08 (F1, F2)
+**Last updated:** 2026-10-08 (F1, F2, F-1/F-2 fixes, DESIGN v1.0.1)
 
 ## Open items
 
 | # | Found in | Gap or conflict | What was built (closest token) | For v1.1 |
 |---|---|---|---|---|
 | 1 | F1 freshness pill | §2 says status colours "never appear on the Live or Insights pages", but §7 gives the freshness pill a status-coloured dot on every page. | Followed §7: dot = `status.ok` / `status.warn` / `status.fail`, always with the word (Live / Delayed / Paused). Dot only, never text or fills. | State the exception explicitly in §2. |
-| 2 | F1 freshness pill | Which timestamp "Data as of" shows: `live.json` has `generated_at` (export time) and `data_as_of` (feed snapshot, usually 1–5 min older). | Pill age **and** time use `generated_at` (so the word and the time never disagree). Footer "Data through" uses `data_as_of`. | Name the field in §7. |
+| 2 | F1 freshness pill | Which timestamp "Data as of" shows: `live.json` has `generated_at` and `data_as_of` (newest feed snapshot in the export, normally 1–2 min behind while Spark runs). | Pill age **and** time use `generated_at` (so the word and the time never disagree). Since 2026-10-08 the exporter sets `generated_at` = time of the last export with new data (`data_as_of` advanced); with no new data it keeps the old `generated_at` and does not rewrite the files (also across exporter restarts), so a stopped pipeline goes Delayed → Paused. Using `data_as_of` directly would make the 2 / 5 min thresholds flicker with its normal lag. Footer "Data through" uses `data_as_of`. | Name the field and its meaning in §7. |
 | 3 | F1 nav (phone) | Phone nav is "wordmark + freshness dot + menu button": the theme toggle has no place below 600 px, and the overlay's contents aren't specified. | Overlay = wordmark + close icon button, links at `display-lg` 600, a hairline, then a `button-secondary` theme toggle with visible text ("Switch to dark theme"). From 600 px the icon toggle is in the nav bar too. | Specify overlay layout and where the toggle lives on phones. |
 | 4 | F1 nav | Current-page and hover styles for nav links aren't specified. | Links `body`, current page `ink` + 2 px underline (offset 6 px) + `aria-current="page"`; hover = `surface` background (like `icon-button`). | Confirm or replace. |
 | 5 | F1 nav | Wordmark size not specified (only "Plex Sans 600"). | `body-lg` size (18 px), 600. | Add a `wordmark` type token. |
@@ -43,6 +44,9 @@
 | 30 | F2 hit area | "Hit area 22 px radius on touch, 10 px on pointer" with ~400 markers: per-marker hit circles would overlap heavily. | The nearest station within 10 px (pointer) or 22 px (touch) of the click is picked in JS; markers stay small. | Confirm nearest-station hit testing. |
 | 31 | F2 tooltip size | Tooltip `maxWidth: 280px` can't fit beside a marker on small tablets. | `max-width: min(280px, 46 % of the map)`, placed right of the marker in the left half and left of it in the right half; vertically centred, or anchored at its top/bottom near the map's top/bottom third. | Specify placement rules. |
 | 32 | F2 page header | §4 asks for "page title + freshness pill" on Live while the nav already has the pill. | Both: the nav pill (dot only on phones) and a full pill beside the Live title, so phones see the words. | Confirm two pills on Live. |
+| 33 | F2 state-change pulse | §5 says a marker whose state changed "pulses its ring once"; markers have no separate ring element, so the pulse is built on the marker itself. | `map.js` scales the whole marker 1 → 1.6 → 1 once over 600 ms (Web Animations; skipped under reduced motion), alongside the 200 ms fill cross-fade. | Say whether the pulse is a ring (needs an extra element) or the marker; or accept the scale. |
+| 34 | F2 container queries | §4 asks for container queries for component internals (stat tile, chart card, alert row, table); only the stat tile has one (`container-type: inline-size`, `@container (max-width: 150px)` in `components.css`). The table scrolls in its wrapper instead; chart card and alert row don't exist yet (M4 / F3). | Stat tile only; the others use the wrapper scroll or `auto-fit` grids. | Decide which components really need one when F3/F4 build them. |
+| 35 | Touch-target scan (2026-10-08) | At 390 px with touch emulation, some pressables outside the List view are still under 44 px: the KPI ⓘ buttons (41 × 44 px), and the footer links "DockWatch on GitHub" / "Data sources and licences" (18 px tall) and "Bay Wheels License Agreement" (38 px). Inline links in About's body text (20 px) are text links in sentences. | Not changed in this loop (scope: List view only). | Fix as accessibility fixes (§8) in a later loop; confirm whether in-sentence links are exempt. |
 
 ## Sources used for assets
 - **Icons:** Lucide **v1.52.0** (`lucide-static` npm package), ISC; path data copied verbatim, drawn at 20 px with a

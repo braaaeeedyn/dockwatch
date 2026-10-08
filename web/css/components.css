@@ -610,6 +610,35 @@
   background: var(--surface-2);
 }
 
+/* Touch: header sort buttons and station-name buttons get 44 px hit areas (DESIGN §8). The name button is 44 px
+   tall, centred in its row, and its ::before covers the whole sticky name cell; the underlined text looks the same. */
+@media (pointer: coarse) {
+  .sort-button {
+    min-height: 44px;
+  }
+
+  .data-table tbody th,
+  .data-table tbody td {
+    vertical-align: middle;
+  }
+
+  .data-table tbody th {
+    padding-block: var(--space-xxs); /* room for the 2 px focus ring + 2 px offset */
+  }
+
+  .data-table tbody .link-button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .data-table tbody .link-button::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+}
+
 .icon-sort {
   width: 16px;
   height: 16px;

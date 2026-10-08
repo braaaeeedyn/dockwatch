@@ -61,21 +61,98 @@ export function createList({ table, caption }) {
     }
   }
 
-  function row(s, now) {
+  // Rows are updated in place, keyed by station id, so the 60 s refresh keeps keyboard focus and scroll position.
+  const rowsById = new Map(); // id -> { tr, button, cells: HTMLTableCellElement[], values: string[] }
+  const CELL_CLASSES = ["data", "", "num", "num", "num", "num"];
+
+  function count(n) {
+    return n === null || n === undefined ? "—" : number.format(n);
+  }
+
+  /** The cells after the name: code, state (HTML), bikes, docks, in state for, last reported. */
+  function cellValues(s, now) {
     const info = stateInfo(s.state);
     const since = age(s.state_since, now);
     const reported = age(s.last_reported, now);
-    return (
-      `<tr data-id="${escapeHtml(s.id)}">` +
-      `<th scope="row"><button type="button" class="link-button" data-show-station="${escapeHtml(s.id)}">${escapeHtml(s.name)}</button></th>` +
-      `<td class="data" translate="no">${s.code ? escapeHtml(s.code) : "—"}</td>` +
-      `<td><span class="state-word" data-state="${escapeHtml(s.state)}"><span class="swatch" data-state="${escapeHtml(s.state)}" aria-hidden="true"></span>${escapeHtml(info.word)}</span></td>` +
-      `<td class="num">${number.format(s.bikes)}</td>` +
-      `<td class="num">${number.format(s.docks)}</td>` +
-      `<td class="num">${since === null ? "—" : formatDuration(since)}</td>` +
-      `<td class="num">${reported === null ? "—" : reported < 60_000 ? "under 1 min ago" : `${formatDuration(reported)} ago`}</td>` +
-      `</tr>`
-    );
+    return [
+      s.code ?? "—",
+      `<span class="state-word" data-state="${escapeHtml(s.state)}"><span class="swatch" data-state="${escapeHtml(s.state)}" aria-hidden="true"></span>${escapeHtml(info.word)}</span>`,
+      count(s.bikes),
+      count(s.docks),
+      since === null ? "—" : formatDuration(since),
+      reported === null ? "—" : reported < 60_000 ? "under 1 min ago" : `${formatDuration(reported)} ago`,
+    ];
+  }
+
+  const STATE_CELL = 1; // the only cell set as HTML (escaped above); the others use textContent
+
+  function createRow(s) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = s.id;
+    const th = document.createElement("th");
+    th.scope = "row";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "link-button";
+    button.dataset.showStation = s.id;
+    th.append(button);
+    tr.append(th);
+    const cells = CELL_CLASSES.map((cls, i) => {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      if (i === 0) td.setAttribute("translate", "no");
+      tr.append(td);
+      return td;
+    });
+    return { tr, button, cells, values: [] };
+  }
+
+  function updateRow(entry, s, now) {
+    if (entry.button.textContent !== s.name) entry.button.textContent = s.name;
+    cellValues(s, now).forEach((value, i) => {
+      if (entry.values[i] === value) return;
+      entry.values[i] = value;
+      if (i === STATE_CELL) entry.cells[i].innerHTML = value;
+      else entry.cells[i].textContent = value;
+    });
+  }
+
+  function reconcile(stations, now) {
+    const wrap = table.closest(".table-wrap");
+    const scroll = wrap && { top: wrap.scrollTop, left: wrap.scrollLeft };
+    const active = document.activeElement;
+    const focusedId = body.contains(active) && active.matches("[data-show-station]") ? active.dataset.showStation : null;
+    const oldOrder = [...body.children].map((tr) => tr.dataset.id);
+
+    const wanted = new Set(stations.map((s) => s.id));
+    for (const [id, entry] of rowsById) {
+      if (wanted.has(id)) continue;
+      entry.tr.remove();
+      rowsById.delete(id);
+    }
+    stations.forEach((s, i) => {
+      let entry = rowsById.get(s.id);
+      if (!entry) {
+        entry = createRow(s);
+        rowsById.set(s.id, entry);
+      }
+      updateRow(entry, s, now);
+      const at = body.children[i];
+      if (at !== entry.tr) body.insertBefore(entry.tr, at ?? null); // only rows out of place move
+    });
+
+    // Safety net: moving a focused node can drop focus. Put it back on the same station, or a neighbour if its row
+    // left the list (e.g. "only problems" and it became ok), without scrolling.
+    if (focusedId !== null) {
+      const from = oldOrder.indexOf(focusedId);
+      const candidates = [focusedId, ...oldOrder.slice(from + 1), ...oldOrder.slice(0, from).reverse()];
+      const target = candidates.map((id) => rowsById.get(id)).find(Boolean);
+      if (target && document.activeElement !== target.button) target.button.focus({ preventScroll: true });
+    }
+    if (scroll) {
+      wrap.scrollTop = scroll.top;
+      wrap.scrollLeft = scroll.left;
+    }
   }
 
   function render(stations, { regionName, problemsOnly }) {
@@ -91,7 +168,7 @@ export function createList({ table, caption }) {
         if (b.v === null && a.v !== null) return -1;
         return sign * compare(a.v, b.v) || compare(a.s.name, b.s.name);
       });
-    body.innerHTML = rows.map(({ s }) => row(s, now)).join("");
+    reconcile(rows.map(({ s }) => s), now);
     const what = problemsOnly ? "Problem stations" : "Stations";
     caption.textContent = `${what} in ${regionName}: ${number.format(stations.length)}, sorted by ${column.label.toLowerCase()} (${sort.direction})`;
     paintHeaders();

@@ -72,8 +72,35 @@ def build_live(states: dict[str, dict], infos: dict[str, dict], now: float) -> d
     }
 
 
-def build_alerts(alerts: dict[str, dict], infos: dict[str, dict], now: float) -> dict:
-    """alerts: alert_id -> gbfs.alerts value (duplicates already collapsed by key)."""
+def carry_generated_at(live: dict, previous: dict | None) -> dict:
+    """`generated_at` means "time of the last export that had new data". If the previous export has the same
+    non-null `data_as_of`, keep its `generated_at`, so a stopped pipeline makes the site go Delayed -> Paused."""
+    old = previous.get("data_as_of") if previous else None
+    if old is not None and old == live.get("data_as_of") and previous.get("generated_at"):
+        return live | {"generated_at": previous["generated_at"]}
+    return live
+
+
+def _parse(ts: str) -> datetime:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def has_new_data(live: dict, previous: dict | None) -> bool:
+    """True if `live` should be written: there is no previous export, or `data_as_of` moved forward."""
+    if previous is None:
+        return True
+    new, old = live.get("data_as_of"), previous.get("data_as_of")
+    if new is None:
+        return False
+    try:
+        return old is None or _parse(new) > _parse(old)
+    except (TypeError, ValueError):  # a hand-edited or corrupt previous file: write a fresh one
+        return True
+
+
+def build_alerts(alerts: dict[str, dict], infos: dict[str, dict], now: float, generated_at: str | None = None) -> dict:
+    """alerts: alert_id -> gbfs.alerts value (duplicates already collapsed by key). Pass the live doc's
+    `generated_at` so live.json and alerts.json never disagree."""
     by_episode: dict[str, dict] = {}
     for a in sorted(alerts.values(), key=lambda a: a["ts"]):
         ep = by_episode.setdefault(a["episode_id"], {"episode_id": a["episode_id"], "station_id": a["station_id"]})
@@ -96,4 +123,4 @@ def build_alerts(alerts: dict[str, dict], infos: dict[str, dict], now: float) ->
         rows.append(ep)
     open_ = sorted((r for r in rows if "resolved" not in r), key=lambda r: r["started"])  # longest-running first
     resolved = sorted((r for r in rows if "resolved" in r), key=lambda r: r["resolved"], reverse=True)
-    return {"generated_at": iso(now), "open": open_, "resolved": resolved[:RESOLVED_KEPT]}
+    return {"generated_at": generated_at or iso(now), "open": open_, "resolved": resolved[:RESOLVED_KEPT]}
