@@ -2,7 +2,7 @@
 // Contents in order: name, code, state word with swatch, "8 bikes (5 e-bikes) · 11 docks", "Empty for 34 min" when the
 // station is in an episode (`state_since`), "Last reported 2 min ago".
 
-import { formatDuration, parseTime } from "../util/time.js";
+import { formatDuration, formatShortClock, parseTime } from "../util/time.js";
 import { stateInfo } from "./states.js";
 
 const PHONE = window.matchMedia("(max-width: 599.98px)");
@@ -30,8 +30,14 @@ export function detailsBody(s, now = Date.now()) {
   ];
   if (since) lines.push(`<p class="details__since">${escapeHtml(info.word)} for ${formatDuration(now - since.getTime())}</p>`);
   const ago = reported ? now - reported.getTime() : null;
-  const reportedText =
-    ago === null ? "No report time from the station" : ago < 60_000 ? "Last reported under 1 min ago" : `Last reported ${formatDuration(ago)} ago`;
+  const replayAt = parseTime(s.replay_at); // replay frames carry no report times
+  const reportedText = replayAt
+    ? `Replay, state at ${formatShortClock(replayAt)}`
+    : ago === null
+      ? "No report time from the station"
+      : ago < 60_000
+        ? "Last reported under 1 min ago"
+        : `Last reported ${formatDuration(ago)} ago`;
   lines.push(`<p class="details__reported">${reportedText}</p>`);
   return lines.join("");
 }

@@ -298,7 +298,9 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
 ### F5 · Polish and launch (week 8)
 - [ ] Playwright screenshots at 320/390/768/1024/1440/2560 px, both themes; axe; keyboard-only pass;
       reduced-motion pass; Lighthouse ≥ 95 performance and 100 accessibility on the Live page.
-- [ ] "Replay a day" mode for when the pipeline is off.
+- [x] "Replay a day" mode for when the pipeline is off. *(2026-10-08: built early with the paused state:
+      `python tasks.py replay-export` → `web/data/replay.json` from the raw archive, played at 10× from the
+      paused banner; the file is refreshed by hand for now.)*
 - **Done when:** checklist in `DESIGN.md §9` passes and the site is live on S3.
 
 ### Portfolio page (after F5)

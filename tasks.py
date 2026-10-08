@@ -145,6 +145,8 @@ TASKS = {
     "verify-lake": lambda *a: spark_inspect("--check", *a),
     "catchup": lambda *a: catchup(),
     "export": lambda *a: uv("python", "-m", "dockwatch.exporter", *a),
+    # "Replay a day" file from the raw GBFS archive (host only, no Spark). Not `replay`: that re-publishes to Kafka.
+    "replay-export": lambda *a: uv("python", "-m", "dockwatch.exporter.replay", *a),
     "geo": lambda *a: uv("--group", "geo", "python", "-m", "dockwatch.geo", *a),
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),

@@ -28,9 +28,50 @@ const shortClockFormat = new Intl.DateTimeFormat(LOCALE, {
   minute: "2-digit",
 });
 
+const monthDayFormat = new Intl.DateTimeFormat(LOCALE, { timeZone: TIME_ZONE, month: "short", day: "numeric" });
+
+const pacificDateFormat = new Intl.DateTimeFormat("en-CA", {
+  timeZone: TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 /** "3:42 PM" (Pacific). */
 export function formatShortClock(date) {
   return shortClockFormat.format(date);
+}
+
+/** "Oct 6" (Pacific). */
+export function formatMonthDay(date) {
+  return monthDayFormat.format(date);
+}
+
+/** The Pacific calendar date as "YYYY-MM-DD". */
+export function pacificDate(date) {
+  return pacificDateFormat.format(date);
+}
+
+/** True when `date` falls on today's Pacific date. */
+export function isTodayPacific(date, now = Date.now()) {
+  return pacificDate(date) === pacificDate(new Date(now));
+}
+
+/** When paused data was made: "3:42 PM", or "3:42 PM on Oct 6" when that wasn't today (Pacific). */
+export function formatPausedAt(date, now = Date.now()) {
+  const clock = formatShortClock(date);
+  return isTodayPacific(date, now) ? clock : `${clock} on ${formatMonthDay(date)}`;
+}
+
+/** A Pacific day "2026-10-07" as DESIGN's replay label "Tuesday 7 Oct". */
+export function formatReplayDay(day) {
+  const date = new Date(`${day}T12:00:00Z`);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat(LOCALE, { timeZone: "UTC", weekday: "long", day: "numeric", month: "short" })
+      .formatToParts(date)
+      .map((p) => [p.type, p.value]),
+  );
+  return `${parts.weekday} ${parts.day} ${parts.month}`;
 }
 
 /** A duration in plain words: "under 1 min", "34 min", "2 h 5 min", "3 days". */

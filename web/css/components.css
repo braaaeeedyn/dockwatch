@@ -48,6 +48,20 @@
   background: var(--surface-2);
 }
 
+/* Touch: browsers hit-test the rounded corners away, which leaves a 44 px icon button short of a full 44 x 44 px
+   hit area (DESIGN §8). A square, invisible ::after gives the corners back without changing the look. */
+@media (pointer: coarse) {
+  .icon-button {
+    position: relative;
+  }
+
+  .icon-button::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+}
+
 .icon {
   width: 20px;
   height: 20px;
@@ -330,6 +344,7 @@
 }
 
 .stat-tile__info {
+  flex-shrink: 0; /* stays 44 x 44 px when a long label squeezes the tile head */
   color: var(--body);
 }
 
@@ -491,6 +506,39 @@
 
 .banner--warn .icon {
   color: var(--status-warn);
+}
+
+.banner > .icon {
+  flex-shrink: 0;
+}
+
+.banner__body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  justify-items: start;
+  gap: var(--space-sm);
+}
+
+.banner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm) var(--space-lg);
+}
+
+/* Replay mode (DESIGN §7): neutral banner (mute border) with the replay clock, which is not a live region. */
+.banner--replay .icon {
+  color: var(--body);
+}
+
+.banner__clock {
+  color: var(--body);
+}
+
+.banner__action[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: progress;
 }
 
 /* ---- Skeleton (static: DESIGN §5 allows no continuous motion besides the freshness dot) ---- */

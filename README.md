@@ -29,6 +29,7 @@ python tasks.py setup                # create Kafka topics + local bucket
 python tasks.py produce              # poll Bay Wheels GBFS -> Kafka + raw archive in local S3
 python tasks.py export               # live.json / alerts.json for the site, every 60 s
 python tasks.py geo                  # (once) Census map shapes -> web/geo/*.json (committed)
+python tasks.py replay-export        # "Replay a day": web/data/replay.json from the raw archive (no Spark; --date, --step)
 ```
 
 Spark (Kafka -> Iceberg, episodes, alerts) runs **on demand only** (one Spark JVM at a time; never restarted

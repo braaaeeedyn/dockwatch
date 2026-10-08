@@ -274,7 +274,11 @@ test("markers are reachable with the keyboard", async ({ page }) => {
 
 test("stale banner appears when data is older than 5 minutes", async ({ page }) => {
   const banner = page.locator("[data-stale-banner]");
-  const expected = `Live data paused — showing the state at ${shortClock.format(new Date(LIVE.generated_at))}.`;
+  // DESIGN §6's sentence with the time, then why the data stopped and that the page recovers on its own.
+  const expected =
+    `Live data paused — showing the state at ${shortClock.format(new Date(LIVE.generated_at))}. ` +
+    "The DockWatch pipeline isn’t running right now, so no new station data is coming in; " +
+    "the map updates on its own when it restarts.";
 
   await openLive(page, { ageMs: 30_000 });
   await expect(banner).toBeHidden();

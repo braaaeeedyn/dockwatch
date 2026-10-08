@@ -292,3 +292,8 @@
 .legend .data {
   color: var(--body);
 }
+
+/* Replay mode: markers change state every few seconds, so no fill cross-fade (and live.js skips the pulse). */
+.is-replay .marker {
+  transition: none;
+}

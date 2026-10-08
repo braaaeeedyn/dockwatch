@@ -465,3 +465,125 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
 **Results**
 - ruff, ruff format, host pytest 46 passed / 1 skipped; Playwright 24/24 (shell 9, live map 14, touch targets 1);
   the two new browser tests 10/10 with `--repeat-each=5`.
+
+## 2026-10-08 · F2 follow-up + F5 · pipeline-off banner, Replay a day, 44 px everywhere
+
+**Did**
+- **Paused is a first-class state.** The Live banner keeps DESIGN §6's sentence and adds why and what next: "Live data
+  paused — showing the state at 9:24 PM. The DockWatch pipeline isn't running right now, so no new station data is
+  coming in; the map updates on its own when it restarts." With data from an earlier Pacific day it says "… at
+  9:24 PM on Oct 7", and the pill says "Data as of Oct 7, 9:24:19 PM". `live.js` no longer has its own
+  `> DELAYED_MAX_MS` test: the banner uses `freshnessState()` and flips on the pill's tick (`freshness.js` broadcasts
+  `dockwatch:freshness` on every render). Insights, Pipeline and About get a visually hidden polite region that
+  announces only transitions ("Live data paused — …" / "Live data is back."), never on first load and never on Live
+  (the banner's `role="status"` speaks there).
+- **Replay a day.** New `src/dockwatch/exporter/replay.py` + `python tasks.py replay-export`: reads one Pacific day
+  of `raw/gbfs/station_status` snapshots from SeaweedFS on the host (both UTC `dt=` partitions, filtered by Pacific
+  date, the last snapshot per 60 s bucket), computes states with the shared `classify()` / `capacity_of()` and views
+  with `view_for()`, and writes `web/data/replay.json` atomically (format v1: station list + frames of
+  `[index, state, bikes, docks]`, frame 0 full, then only changed stations). Busiest stations get the smallest
+  indices, which keeps the numbers short. No Spark JVM. On the site, the paused banner probes the file once with
+  `HEAD` and only then shows "Replay a day"; replay mode (`web/js/live/replay.js`) decodes frames incrementally into
+  `live.json`-shaped stations and plays them at 10× through the normal map / legend / list / details / KPI code, with
+  a neutral banner "Replay mode — showing Wednesday 7 Oct, 10× speed [Exit]" and a clock outside any live region.
+  No pulse or cross-fade in replay, no map-summary announcements per frame, the pill keeps telling the truth about
+  live data, Exit restores live data and focus.
+- **Touch targets (DESIGN_BACKLOG #35 resolved):** KPI ⓘ buttons `flex-shrink: 0` (were squeezed to 41 px); on
+  `pointer: coarse` every footer link, including "Bay Wheels License Agreement" inside its sentence, is a 44 px tall
+  `inline-flex` box; icon buttons get a square invisible `::after`, because Chromium hit-tests their rounded corners
+  away (the scan found that the 44 × 44 ⓘ, menu and theme buttons missed their corner points). `touch-targets.spec.js`
+  gained two tests that hit-test every button, link, summary and segmented label on all four pages at 390 and
+  1280 px with honest touch emulation; exempt (and asserted): About's in-sentence links and map markers.
+- Tests: `tests/test_replay.py` (6), `tests/web/replay.spec.js` (7), a shell test for the announcements, the stale
+  banner test's expected text now includes the reason sentence (same assertions). `prepare()` routes
+  `data/replay.json` to 404 by default, or to the new fixture `tests/web/fixtures/replay.json` (built with
+  `--step 600` from the real archive: 51 frames, 641 stations, 212,618 bytes).
+- Docs: CURRENT_STATE, DESIGN_BACKLOG (#22 updated, #35 resolved, #36–#44 new), IMPLEMENTATION_PLAN (F5 "Replay a
+  day" ticked), README (`replay-export`). DESIGN.md unchanged (v1.0.1).
+
+**Decided**
+- No exporter heartbeat / `pipeline: stopped` field: with the laptop off nothing writes any file, so it could only
+  separate "Spark off" from "everything off", which are the same to a visitor. The banner infers it from
+  `generated_at`.
+- Replay source = the raw archive read on the host, not Iceberg (a Spark JVM is the memory we protect; 5-minute
+  windows are coarser). Pacific day, default = latest complete Pacific day.
+- "Replay a day" is a button (it changes the page's mode); no pause or scrubber (Exit is the stop control).
+
+**Tried and changed**
+- The plan's size test (641 stations × 1440 frames × 100 changed stations per frame ≤ 1.5 MB) does not fit format v1
+  with realistic numbers: 1,742,868 bytes (uniform picks; ~10.5 characters per changed station, the index alone is
+  ~2.8 digits). Even with the real change skew it would be ~1.65 MB. Measured: 60 changes/frame → 1.12 MB, 80 →
+  1.43 MB, 85 → 1.51 MB. Real days change ~53 stations per minute (max 170 in one frame on Oct 7), so a full real
+  day is ~1 MB. Ordering stations busiest-first was added (it cut the real file's average index to ~2.5 digits) but
+  can't help a uniform worst case. `test_full_day_fits_the_size_budget` was therefore **not** added rather than
+  shipped failing or with smaller-than-real numbers; the plan's numbers need a decision.
+- Ruling, same day (size budget): 100 changes/frame measured 1,742,868 B, so the 1.5 MB budget was kept and the
+  synthetic rate set to 80 changes/frame, ~1.5× the real mean of 53/min: the total size follows the day's mean change
+  rate, not its one-frame peak, and raising the budget would loosen the phone page-weight limit to fit a badly chosen
+  test input. The test was added in the next entry.
+- The first touch scan failed on every 44 × 44 icon button's corners (rounded corners are not hit-testable); fixed
+  with the square `::after` rather than by making the buttons bigger.
+
+**Results**
+- Real `python tasks.py replay-export`: 2026-10-07 (Pacific), 401,833 bytes, 641 stations, 492 frames, step 60 s,
+  ~5 s; `check_web.py replay --real` ok.
+- ruff + ruff format clean; host pytest 52 passed / 1 skipped; Playwright 34/34 (shell 10, live map 14, touch
+  targets 3, replay 7).
+
+## 2026-10-08 · F2 follow-up · shell-suite flake, size-budget test
+
+**Did**
+- **Shell-suite regression.** In the Checker run after the previous entry, `shell.spec.js` › "nav menu opens below
+  1120 px, traps focus and closes with Escape" timed out in `open()`: the nav pill stayed `data-state="loading"` for
+  5 s. The suite ran right after the Spark-in-Docker checks (`verify-lake`, `test-spark`) on a memory-tight host.
+- **Root-cause analysis (read-only, before any change).** The previous entry's freshness rewiring is ruled out:
+  `render()` sets the pill's `data-state` before any of the new code (announcer, `dockwatch:freshness`), a failed
+  read gives `freshnessState(null)` = "paused", not "loading", and a throwing `dockwatch:live` listener does not stop
+  `render()`. Timed from page `load` to the pill update, old (`ec88e8f`) and new code match (idle 7–17 vs 6–16 ms,
+  6× CPU 67–125 vs 70–183 ms, 20× CPU 387–764 vs 353–833 ms). So "loading after 5 s" can only mean (a) the page's
+  module graph never ran (a module request failed or stalled) or (b) the first `fetch("data/live.json")` never
+  settled, and `fetchLive()` had no timeout, so (b) meant "Loading…" until the next 60 s poll. The one stall seen
+  while investigating was on start-commit code (6× CPU, 390 px, second navigation: no `dockwatch:live` for 60 s), so
+  the failure class predates the replay / paused work.
+- **Fixes, one per open failure mode, no loosening.** (b) `fetchLive()` aborts a read after 10 s (`AbortController`
+  + `setTimeout`, so the tests' fake clock drives it); a timed-out read is a failed read, so the pill says
+  "Paused · No data yet" and the Live page shows its existing "Live station data couldn’t be loaded…" with Retry.
+  (a) `tests/web/serve.py` speaks HTTP/1.1 with keep-alive (`protocol_version`, `daemon_threads`), so Chromium reuses
+  a few sockets per page instead of a new TCP connection per file, the transport failure class this host has shown
+  before (`ERR_CONNECTION_REFUSED`). No `playwright.config.js` change, no retries, no longer waits.
+- **Failures explain themselves.** `helpers.js` `watchPage()` (called from `prepare()`) records, per navigation,
+  failed requests, pending requests, page errors, console errors, and whether `data/live.json` was requested and
+  answered; `open()` keeps its exact pill assertion and, if it fails, rethrows with that summary appended. Checked on
+  a forced failure (a refused `replay.js`): the message read "data/live.json: requested 0x … failed requests:
+  …/js/live/replay.js: net::ERR_CONNECTION_REFUSED", i.e. case (a), which the read timeout alone cannot fix.
+- **New test** `shell.spec.js` › "freshness pill does not stay on Loading when live.json never answers": live.json
+  never answers; after a 10 s fast-forward Insights' pill is Paused with "No data yet"; on Live the error and Retry
+  show, and once live.json answers Retry brings the pill to Live and draws the markers. It fails with the timeout
+  removed (pill still "loading").
+- **Size budget.** `tests/test_replay.py::test_full_day_fits_the_size_budget`, as ruled: 641 stations with realistic
+  metadata (UUID ids, ~24-character names, `SF-A12` codes, 6-decimal lat/lon, capacities 11–35), 1440 frames at
+  `step_s` 60 on one Pacific day, frame 0 full, then 80 distinct stations per frame (`random.Random(20261007)`), each
+  a ±1 bike move with docks = capacity − bikes, renting and freshly reported, so `classify()` sets the state; built
+  with the real `build_replay()` and written with the real `write_json()`. 1,411,600 bytes (budget 1,500,000), with
+  asserts on 641 stations, 1440 frames and 641 + 1439 × 80 encoded changes so it can't pass vacuously.
+- Docs: DESIGN_BACKLOG #45 "Replay size budget", CURRENT_STATE (counts, read timeout, keep-alive).
+
+**Decided**
+- Size budget stays 1.5 MB; the synthetic rate is 80 changes/frame (100 measured 1,742,868 B; see the ruling line in
+  the previous entry and DESIGN_BACKLOG #45).
+- The read timeout is product code, not a test fix: a visitor on a stalled connection saw "Loading…" for up to 60 s.
+  The 60 s poll and 15 s tick are unchanged; no backoff.
+
+**Tried**
+- Reproducing under the Checker's conditions: `python tasks.py test-spark` (one Spark container), then at once the
+  shell suite `--repeat-each 5`, twice: 55/55 and 55/55. `test-spark`, then the nav-menu test `--repeat-each 20`:
+  20/20. The shell suite `--repeat-each 3` while `test-spark` ran at the same time: 33/33. Earlier, read-only:
+  50/50, 40/40 (8 workers), 30/30 with all 16 cores busy, and ~1,300 scripted first navigations at 6× CPU with no
+  stall.
+
+**Results**
+- **The flake was not reproduced** in any of these runs, before or after the fixes, so its exact trigger is still
+  unproven; (a) or (b) under memory pressure remains the most likely cause. The two fixes remove failure mode (b)
+  and most of the connection churn behind (a), and any recurrence now names its cause in the test log.
+- ruff + ruff format clean; host pytest 53 passed / 1 skipped; Playwright 35/35 (shell 11, live map 14, touch
+  targets 3, replay 7).

@@ -1,13 +1,18 @@
 // Live page (F2): KPI tiles, the station map with region / Map | List / "Show only problems" controls, legend,
-// station details, stale banner and the polite map summary. Data: live.json (shared 60 s poll in freshness.js,
-// delivered as "dockwatch:live" events), alerts.json (re-read with every live.json refresh), geo/<region>.json.
+// station details, paused banner with "Replay a day", and the polite map summary. Data: live.json (shared 60 s poll in
+// freshness.js, delivered as "dockwatch:live" events), alerts.json (re-read with every live.json refresh),
+// geo/<region>.json, and data/replay.json on demand (replay.js).
+// Paused = freshnessState() === "paused", the same rule and the same tick ("dockwatch:freshness") as the pill.
+// Replay mode renders decoded frames through the same paths as live data, without pulses, cross-fades or map-summary
+// announcements; live refreshes keep updating the pill but not the map until Exit.
 
 import { latestLive, refreshLive } from "../freshness.js";
 import { createStationMap } from "../map/map.js";
-import { DELAYED_MAX_MS, formatShortClock, parseTime } from "../util/time.js";
+import { formatPausedAt, formatReplayDay, formatShortClock, freshnessState, parseTime } from "../util/time.js";
 import { createDetails } from "./details.js";
 import { createKpis } from "./kpis.js";
 import { createList } from "./list.js";
+import { createPlayer, loadReplay, replayAvailable, SPEED } from "./replay.js";
 import { DEFAULT_REGION, REGIONS, STATES, isProblem } from "./states.js";
 
 const STORAGE_KEY = "dockwatch-region";
@@ -54,6 +59,8 @@ export function initLive() {
   let liveError = false;
   let renderedRegion = null; // region whose markers are on the map now
   let lastSummary = "";
+  let replay = null; // { player, doc, data } while replay mode is on
+  let replayProbe = null; // the one HEAD request for data/replay.json
 
   // ---- elements ----
   const regionInputs = [...root.querySelectorAll('input[name="region"]')];
@@ -66,6 +73,11 @@ export function initLive() {
   const legend = root.querySelector("[data-legend]");
   const summary = root.querySelector("[data-map-summary]");
   const banner = document.querySelector("[data-stale-banner]");
+  const bannerBody = banner.querySelector("[data-stale-body]");
+  const replayBanner = document.querySelector("[data-replay-banner]");
+  const replayStatus = replayBanner.querySelector("[data-replay-status]");
+  const replayClock = replayBanner.querySelector("[data-replay-clock]");
+  const exitButton = replayBanner.querySelector("[data-replay-exit]");
   const kpis = createKpis(document.querySelector("[data-kpis]"));
 
   const map = createStationMap({
@@ -88,8 +100,13 @@ export function initLive() {
   const list = createList({ table: listView.querySelector("table"), caption: listView.querySelector("caption") });
 
   // ---- data helpers ----
+  /** What the map shows: the current replay frame in replay mode, else the latest live export. */
+  function shown() {
+    return replay?.data ?? live;
+  }
+
   function regionStations() {
-    return (live?.stations ?? []).filter((s) => s.view === ui.region);
+    return (shown()?.stations ?? []).filter((s) => s.view === ui.region);
   }
 
   function visibleStations() {
@@ -98,7 +115,7 @@ export function initLive() {
   }
 
   function regionCounts() {
-    const fromExport = live?.counts?.[ui.region];
+    const fromExport = shown()?.counts?.[ui.region];
     if (fromExport) return fromExport;
     const counts = {};
     for (const s of regionStations()) counts[s.state] = (counts[s.state] ?? 0) + 1;
@@ -106,7 +123,7 @@ export function initLive() {
   }
 
   function findStation(id) {
-    return (live?.stations ?? []).find((s) => s.id === id) ?? null;
+    return (shown()?.stations ?? []).find((s) => s.id === id) ?? null;
   }
 
   async function loadGeo(region) {
@@ -126,7 +143,7 @@ export function initLive() {
     } catch {
       alerts = alerts || false; // keep the last good copy if there is one
     }
-    if (live) kpis.render(live, alerts);
+    if (live && !replay) kpis.render(live, alerts);
   }
 
   // ---- URL + controls ----
@@ -178,6 +195,7 @@ export function initLive() {
   }
 
   function renderSummary() {
+    if (replay) return; // no announcement per replay frame; updated again on Exit
     const c = regionCounts();
     const text = `${REGIONS[ui.region].short}: ${c.empty ?? 0} empty, ${c.full ?? 0} full, ${c.offline ?? 0} offline`;
     if (text !== lastSummary) {
@@ -186,11 +204,85 @@ export function initLive() {
     }
   }
 
-  function renderStale() {
+  /** Paused banner, from the shared freshness rule; `state` comes from the pill's tick when it triggered this. */
+  function renderStale(state) {
     const generatedAt = parseTime(live?.generated_at);
-    const stale = generatedAt && Date.now() - generatedAt.getTime() > DELAYED_MAX_MS;
-    if (stale) banner.querySelector("[data-stale-time]").textContent = formatShortClock(generatedAt);
-    banner.hidden = !stale;
+    const paused = Boolean(generatedAt) && (state ?? freshnessState(generatedAt)) === "paused";
+    if (paused) banner.querySelector("[data-stale-time]").textContent = formatPausedAt(generatedAt);
+    banner.hidden = !paused || replay !== null;
+    replayBanner.hidden = replay === null;
+    if (paused) probeReplay();
+  }
+
+  // ---- Replay a day ----
+  function probeReplay() {
+    replayProbe ??= replayAvailable().then((available) => {
+      if (!available || banner.querySelector("[data-replay-start]")) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button-secondary banner__action";
+      button.dataset.replayStart = "";
+      button.textContent = "Replay a day";
+      button.addEventListener("click", startReplay);
+      bannerBody.append(button);
+    });
+  }
+
+  function replayError(text) {
+    let error = banner.querySelector("[data-replay-error]");
+    if (!text) {
+      error?.remove();
+      return;
+    }
+    if (!error) {
+      error = document.createElement("p");
+      error.dataset.replayError = "";
+      banner.querySelector("[data-replay-start]").before(error);
+    }
+    error.textContent = text;
+  }
+
+  async function startReplay() {
+    const button = banner.querySelector("[data-replay-start]");
+    if (replay || button.getAttribute("aria-disabled") === "true") return; // already on, or still loading
+    button.setAttribute("aria-disabled", "true");
+    let doc;
+    try {
+      doc = await loadReplay();
+    } catch {
+      replayError("The replay couldn’t be loaded. Try again later.");
+      return;
+    } finally {
+      button.removeAttribute("aria-disabled");
+    }
+    replayError(null);
+    root.classList.add("is-replay");
+    replay = { doc, data: null, player: null };
+    replay.player = createPlayer(doc, (data) => {
+      replay.data = data;
+      replayClock.textContent = formatShortClock(new Date(data.generated_at));
+      kpis.render(data, alerts, { day: formatReplayDay(doc.day) });
+      render();
+    });
+    banner.hidden = true;
+    replayBanner.hidden = false;
+    replayStatus.textContent = `Replay mode — showing ${formatReplayDay(doc.day)}, ${SPEED}× speed`;
+    replay.player.start();
+    exitButton.focus();
+  }
+
+  function exitReplay() {
+    if (!replay) return;
+    replay.player.stop();
+    replay = null;
+    root.classList.remove("is-replay");
+    replayStatus.textContent = "";
+    replayClock.textContent = "";
+    if (live) kpis.render(live, alerts);
+    render(); // also shows the paused banner again if the data is still old
+    const button = banner.querySelector("[data-replay-start]");
+    if (!banner.hidden && button) button.focus();
+    else root.focus();
   }
 
   function render({ animate = false } = {}) {
@@ -223,7 +315,7 @@ export function initLive() {
         renderedRegion = ui.region;
         animate = false;
       }
-      map.update(stations, { animate });
+      map.update(stations, { animate: animate && !replay });
     }
     if (ui.view === "list") {
       list.render(stations, { regionName: REGIONS[ui.region].short, problemsOnly: ui.problemsOnly });
@@ -288,6 +380,7 @@ export function initLive() {
   }
 
   // ---- events ----
+  exitButton.addEventListener("click", exitReplay);
   for (const input of regionInputs) input.addEventListener("change", () => input.checked && setRegion(input.value));
   for (const input of viewInputs) input.addEventListener("change", () => input.checked && setView(input.value));
   problemsButton.addEventListener("click", () => setProblems(!ui.problemsOnly));
@@ -321,6 +414,10 @@ export function initLive() {
     const first = live === null;
     live = data;
     liveError = false;
+    if (replay) {
+      loadAlerts(); // the pill shows the new data; the map stays on the replay until Exit
+      return;
+    }
     kpis.render(live, alerts);
     render({ animate: !first });
     loadAlerts();
@@ -333,8 +430,10 @@ export function initLive() {
     render();
   });
 
+  // The pill's tick: the banner flips together with it.
+  document.addEventListener("dockwatch:freshness", (event) => renderStale(event.detail.state));
+
   setInterval(() => {
-    renderStale();
     if (details.isOpen()) details.refresh(findStation);
   }, TICK_MS);
 

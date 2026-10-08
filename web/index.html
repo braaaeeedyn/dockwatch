@@ -87,7 +87,20 @@
 
       <div class="banner banner--warn" data-stale-banner role="status" hidden>
         <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>
-        <p>Live data paused — showing the state at <span class="data" data-stale-time></span>.</p>
+        <div class="banner__body" data-stale-body>
+          <p>Live data paused — showing the state at <span class="data" data-stale-time></span>. The DockWatch pipeline isn’t running right now, so no new station data is coming in; the map updates on its own when it restarts.</p>
+        </div>
+      </div>
+
+      <div class="banner banner--replay" data-replay-banner hidden>
+        <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></svg>
+        <div class="banner__body">
+          <p role="status" data-replay-status></p>
+          <div class="banner__row">
+            <p class="banner__clock data" data-replay-clock></p>
+            <button type="button" class="button-secondary banner__action" data-replay-exit>Exit</button>
+          </div>
+        </div>
       </div>
 
       <section class="kpis" data-kpis aria-labelledby="kpis-title" aria-busy="true">
@@ -138,7 +151,7 @@
             <p class="stat-tile__def" id="kpi-def-bikes" hidden>Bikes ready to rent right now at every station, classic bikes and e-bikes together.</p>
           </div>
         </div>
-        <p class="caption">All three regions. From live.json and alerts.json, written by the DockWatch exporter every minute.</p>
+        <p class="caption" data-kpi-caption>All three regions. From live.json and alerts.json, written by the DockWatch exporter every minute.</p>
       </section>
 
       <!-- Desktop: the map spans the content width for now. F3 adds the alerts rail as a second column of .live-layout. -->
