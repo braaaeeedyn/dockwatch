@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Pipeline · DockWatch</title>
+    <meta name="description" content="Health of the DockWatch streaming pipeline.">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff">
+    <script>
+      // Apply a remembered theme before first paint (see js/theme.js).
+      try {
+        var t = localStorage.getItem("dockwatch-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <link rel="preload" href="fonts/ibm-plex-sans-latin-600.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+    <script type="module" src="js/pipeline.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <nav class="nav container" aria-label="Main">
+        <a class="nav__wordmark" href="index.html" translate="no">DockWatch</a>
+        <ul class="nav__links" role="list">
+          <li><a href="index.html">Live</a></li>
+          <li><a href="insights.html">Insights</a></li>
+          <li><a href="pipeline.html" aria-current="page">Pipeline</a></li>
+          <li><a href="about.html">About</a></li>
+        </ul>
+        <div class="nav__tools">
+          <p class="freshness" data-freshness data-state="loading">
+            <span class="freshness__dot" aria-hidden="true"></span>
+            <span class="freshness__text"><span data-freshness-word>Loading…</span><span data-freshness-time></span></span>
+          </p>
+          <button type="button" class="icon-button theme-toggle" data-theme-toggle aria-label="Switch theme">
+            <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg>
+            <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>
+          </button>
+          <button type="button" class="icon-button nav__menu-button" data-nav-open aria-label="Open menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="nav-menu">
+            <svg class="icon icon-menu" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5h16" /><path d="M4 12h16" /><path d="M4 19h16" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+    <dialog class="nav-menu" id="nav-menu" aria-label="Menu">
+      <div class="container">
+        <div class="nav-menu__top">
+          <a class="nav__wordmark" href="index.html" translate="no">DockWatch</a>
+          <button type="button" class="icon-button" data-nav-close aria-label="Close menu">
+            <svg class="icon icon-x" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+          </button>
+        </div>
+        <nav aria-label="Menu">
+          <ul class="nav-menu__links" role="list">
+            <li><a href="index.html">Live</a></li>
+            <li><a href="insights.html">Insights</a></li>
+            <li><a href="pipeline.html" aria-current="page">Pipeline</a></li>
+            <li><a href="about.html">About</a></li>
+          </ul>
+        </nav>
+        <div class="nav-menu__footer">
+          <button type="button" class="button-secondary theme-toggle" data-theme-toggle>
+            <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg>
+            <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>
+            <span data-theme-toggle-label>Switch theme</span>
+          </button>
+        </div>
+      </div>
+    </dialog>
+    <main id="content" class="container" tabindex="-1">
+      <header class="page-header">
+        <h1>Pipeline</h1>
+        <p class="lede">How healthy the data pipeline behind DockWatch is: latency, throughput, freshness and data quality.</p>
+      </header>
+      <section class="card-soft empty-state" aria-labelledby="pipeline-empty">
+        <h2 id="pipeline-empty" class="eyebrow">Arrives with M5</h2>
+        <p>Pipeline health needs the metrics writer and its export, which arrive with milestone M5.</p>
+        <a class="button-secondary" href="index.html">See live station status</a>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="container site-footer__inner">
+        <div>
+          <p>Bay Wheels data provided according to the <a href="https://www.lyft.com/bikes/bay-wheels/data-license-agreement">Bay Wheels License Agreement</a>.</p>
+          <p>Not affiliated with Lyft or Bay Wheels.</p>
+        </div>
+        <div>
+          <p class="data" data-data-through>Data through …</p>
+          <p>Times are Pacific time.</p>
+        </div>
+        <div>
+          <p><a href="https://github.com/braaaeeedyn/dockwatch">DockWatch on GitHub</a></p>
+          <p><a href="about.html#sources">Data sources and licences</a></p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

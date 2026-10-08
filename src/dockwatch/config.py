@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     iceberg_s3_endpoint: str = "http://s3:8333"
     checkpoint_root: str = "/checkpoints"
     trigger_seconds: int = 60
+    # processing_time = run until stopped (tasks.py stream); available_now = catch up on Kafka and exit (catchup)
+    trigger_mode: Literal["processing_time", "available_now"] = "processing_time"
     watermark: str = "10 minutes"
 
     # Exporter (M2): JSON files the static site reads

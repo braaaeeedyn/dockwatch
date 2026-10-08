@@ -92,7 +92,8 @@ services:
       retries: 10
 
   status-stream:
-    # M2 streaming job. Separate profile so it only starts on purpose: python tasks.py stream
+    # M2 streaming job. Separate profile so it only starts on purpose: python tasks.py stream (runs until
+    # stream-stop) or python tasks.py catchup (processes the Kafka backlog with availableNow, then exits).
     profiles: [spark]
     build: infra/spark
     image: dockwatch-spark:3.5.5
@@ -111,7 +112,9 @@ services:
       - checkpoints:/checkpoints
     ports: ["4040:4040"]  # Spark UI
     mem_limit: 2g
-    restart: unless-stopped
+    # Never restarted automatically: on this memory-tight host a stalled driver (heartbeat timeout, see DEVLOG
+    # 2026-10-08) kept coming back and competing with other JVMs. Spark runs on demand only.
+    restart: "no"
 
 volumes:
   checkpoints:

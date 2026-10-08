@@ -18,6 +18,7 @@ from pyspark.sql.streaming.state import GroupState, GroupStateTimeout
 from dockwatch.config import get_settings
 from dockwatch.streaming.episodes import EpisodeState, Thresholds, advance
 from dockwatch.streaming.lake import build_session, ddl, migrate
+from dockwatch.streaming.run_mode import trigger_options
 from dockwatch.streaming.transforms import availability_windows, parse_kafka, to_silver
 
 log = logging.getLogger("dockwatch.status_stream")
@@ -169,7 +170,7 @@ def main() -> None:
         .load()
     )
     parsed = parse_kafka(raw)
-    trigger = {"processingTime": f"{s.trigger_seconds} seconds"}
+    trigger = trigger_options(s)
     ckpt = s.checkpoint_root.rstrip("/")
 
     def iceberg_append(df: DataFrame, name: str, table: str):
@@ -215,8 +216,16 @@ def main() -> None:
         .start()
     )
 
-    log.info("started queries: %s", [q.name for q in spark.streams.active])
-    spark.streams.awaitAnyTermination()
+    log.info("started queries (%s): %s", s.trigger_mode, [q.name for q in spark.streams.active])
+    if s.trigger_mode == "available_now":
+        # Catch-up: every query drains Kafka up to the offsets seen at start, then stops. awaitTermination() re-raises
+        # a query's failure, so the process exits non-zero if any of them failed.
+        for query in list(spark.streams.active):
+            query.awaitTermination()
+            log.info("query %s finished", query.name)
+        spark.stop()
+    else:
+        spark.streams.awaitAnyTermination()
 
 
 if __name__ == "__main__":

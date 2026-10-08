@@ -223,3 +223,207 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
   commits succeed, that the job stops restarting, and that the retried batches left no duplicates or gaps
   (`python tasks.py inspect`).
 - Restarting Docker Desktop also affects other projects' containers, so it is left to the user.
+
+## 2026-10-08 · M2 · Postgres catalog verified; Spark runs on demand
+**Found**
+- The Docker engine was responding again; the stack was up and the job was running on the Postgres catalog. No `SQLITE_BUSY` or
+  `CommitStateUnknownException` since the move (0 matches in the job log, 0 in the `iceberg-rest` log).
+- But `status-stream` had still **restarted twice since 03:26 UTC** (RestartCount=2, OOMKilled=false), for a new
+  reason: `HeartbeatReceiver: Removing executor driver with no recent heartbeats: 135969 ms exceeds timeout 120000 ms`
+  (03:41) and `Executor: Exit as unable to send heartbeats to driver more than 60 times` (03:49). The driver JVM
+  stalled for over 2 minutes, most likely host memory pressure (~2.6 GB free on the host, container at 1.62 / 2 GiB).
+  `restart: unless-stopped` then brought it straight back into the same pressure.
+- `python tasks.py inspect` only printed numbers; nothing failed when they were wrong.
+
+**Removed**
+- `restart: unless-stopped` on `status-stream` (now `restart: "no"`). The job no longer runs 24/7.
+
+**Did**
+- `DOCKWATCH_TRIGGER_MODE` (`config.trigger_mode`): `processing_time` (default, one micro-batch every 60 s) or
+  `available_now`. New pyspark-free `streaming/run_mode.py` (`trigger_options()`) with two host tests
+  (`tests/test_run_mode.py`).
+- In `available_now` mode `status_stream.py` uses Spark's `availableNow` trigger: each of the four queries drains
+  Kafka up to the offsets present at start (still in batches of at most `maxOffsetsPerTrigger` = 100,000), then
+  stops; the job waits for every query (a failed query re-raises, so the process exits non-zero) and stops the
+  session. Same image, command and checkpoints as `stream`, so the two modes can be mixed freely.
+- New tasks: `catchup` (refuses while `status-stream` is running, then `docker compose run --rm --no-deps -e
+  DOCKWATCH_TRIGGER_MODE=available_now status-stream`, blocking, returns the job's exit code) and `verify-lake`
+  (`inspect_tables.py --check`: same report, then assertions, exit 1 on any failure). Checks: silver duplicates on
+  (`station_id`, `snapshot_ts`) = 0; bronze rows = distinct (partition, offset); all 6 partitions present with 0
+  offset gaps; silver's latest snapshot within 5 min of bronze's; every table has an Iceberg snapshot committed in
+  the last 60 min (`--max-age-min`), which proves catalog commits succeed.
+- Ran `stream-stop` → `catchup` → `verify-lake` (04:12–04:14 UTC):
+  - `catchup`: ~28 s wall time including JVM start (backlog ~5 min); all four queries finished, exit 0, no
+    `SQLITE`/`CommitStateUnknown` in the output.
+  - `verify-lake`: **ok**. bronze 208,966 rows = 208,966 distinct (partition, offset) = the sum of the six Kafka
+    high watermarks (33,904 + 30,644 + 34,230 + 32,926 + 36,186 + 41,076), offsets start at 0 in every partition,
+    0 gaps; silver 208,966 rows, 0 duplicates; latest snapshot 04:11:04 UTC in both; availability_5m 41,665 rows;
+    767 episodes; last commit on each table < 1 min old (42 / 44 / 45 / 41 snapshots).
+  - So the retried batches from the SQLite period left **no duplicates and no gaps**; no rebuild from Kafka was needed.
+- `test-spark` still 4 pass; host tests 37 pass.
+
+**Next**
+- F1 (tokens + shell) and F2 (live map). The old `dockwatch_iceberg-catalog` volume can now be deleted by the user
+  (backup stays at `data/iceberg_catalog_backup.db`).
+
+## 2026-10-08 · F1 · design tokens, site shell, Playwright
+**Did**
+- `web/css/tokens.css` written by hand from the DESIGN.md v1.0 front matter: every colour (interface, state,
+  state-text, both heatmap ramps, status, gridline), type scale, radii, spacing, layout, elevation and motion.
+  Light is the default; dark applies via `@media (prefers-color-scheme: dark)` unless the visitor picked light
+  (`[data-theme="light"]`), or whenever they picked dark (`[data-theme="dark"]`). Plus `base.css` (fonts, reset,
+  focus ring, reduced motion), `layout.css` (container, sticky nav, nav overlay, footer) and `components.css`.
+- IBM Plex Sans 400/500/600 and Plex Mono 400/500, Latin `woff2`, self-hosted in `web/fonts/` (from
+  `@fontsource` 5.3.0, files only) with the SIL OFL 1.1 text in `web/fonts/OFL.txt`; `font-display: swap`, Sans 600
+  preloaded. No external requests at all.
+- Four pages (`index.html` Live, `insights.html`, `pipeline.html`, `about.html`), each with one ES-module entry in
+  `web/js/` and a shared shell (`shell.js` → `theme.js`, `nav.js`, `freshness.js`, `util/time.js`):
+  - sticky 56 px nav: wordmark, Live · Insights · Pipeline · About, freshness pill, theme toggle (Lucide v1.52.0
+    icons, inline SVG); below 1120 px the links move into a full-screen `<dialog>` (focus trapped, `Esc` closes,
+    page scroll locked, focus returns to the menu button);
+  - skip link first ("Skip to map" on Live, "Skip to content" elsewhere);
+  - freshness pill from `live.json` `generated_at`: Live < 2 min, Delayed 2–5 min, Paused > 5 min (word + dot,
+    Pacific time), refetched every 60 s and re-evaluated every 15 s;
+  - theme follows the system until the toggle is used; the pick is kept in `localStorage` (wrapped in try/catch)
+    and applied by a tiny inline script before first paint;
+  - footer: Bay Wheels licence attribution, "Not affiliated with Lyft or Bay Wheels", GitHub link,
+    "Data through <date>" (`data_as_of`), "Times are Pacific time.";
+  - Insights / Pipeline show a `card-soft` empty state ("Arrives with M4" / "Arrives with M5"); About covers what
+    DockWatch is, how it works, and data sources + licences (Bay Wheels, Census TIGER, IBM Plex OFL, Lucide ISC);
+  - the Live page has a placeholder card at `#map`; the map itself is F2.
+- Playwright: root `package.json` (private, ES module) with `@playwright/test` pinned to **1.64.0** (matches the
+  cached Chromium 1248, no browser download) and `@axe-core/playwright` 4.13.0; `package-lock.json`;
+  `playwright.config.js` serves `web/` with `python -m http.server 5179`. `node_modules/`, `test-results/`,
+  `playwright-report/` are git-ignored.
+- `tests/web/fixtures/live.json` / `alerts.json`: a copy of a real export (641 stations, 61 open alerts). Every UI
+  test routes `data/*.json` to them and fakes time with `page.clock`, so tests never depend on the live exporter.
+- `tests/web/shell.spec.js` (9 tests, all pass): no horizontal scroll on all 4 pages at 320 / 390 / 768 / 1024 /
+  1440 / 2560 px; axe 0 violations (WCAG 2.0/2.1/2.2 A + AA tags) on all 4 pages at 320 / 768 / 1440 px in light
+  and dark, and in the open nav menu; skip link first; theme toggle remembered across reloads and pages; nav menu
+  traps focus and closes with Escape at 390 / 768 / 1024 px; pill turns Live → Delayed → Paused as time passes.
+- New `docs/DESIGN_BACKLOG.md` with 14 gaps and judgment calls (e.g. the freshness dot uses status colours on every
+  page although §2 keeps status colours off Live/Insights; which timestamp "Data as of" shows; where the theme
+  toggle goes on phones). DESIGN.md is unchanged.
+
+**Tried and changed**
+- The plan's `python -m http.server 5179` as Playwright's web server refused connections under parallel load
+  (`ERR_CONNECTION_REFUSED`: its listen backlog is 5 and Windows refuses instead of queueing; 4 of 9 tests failed with
+  4 workers, and 1 worker still failed once under host load). Replaced by `tests/web/serve.py`, the same stdlib
+  server with a backlog of 128 and quiet logging, on the same port 5179: 9/9 with 4 workers, repeatedly. The config
+  uses 2 workers (memory-tight host); the shell suite takes ~18 s.
+
+**Next**
+- F2: Census TIGER map shapes (`python tasks.py geo` → `web/geo/*.json`), the live station map, KPI tiles, list view,
+  station details, polling and the stale banner; then the M2 spot-check against the public feed.
+
+## 2026-10-08 · F2 · map-shape build step (started early)
+**Did**
+- `src/dockwatch/geo/build.py` (pure functions: `projection_for`, `project`, Douglas–Peucker `simplify`, rectangle
+  `clip` (Sutherland–Hodgman), `build_view`) and `geo/__main__.py`; task `python tasks.py geo` (uv group `geo` with
+  `pyshp`, imported lazily so host pytest doesn't need it).
+- Source: US Census cartographic boundary file `cb_2023_us_county_500k` (clipped to shoreline, public domain),
+  downloaded once to `data/geo/` (git-ignored, 11.6 MB zip). Six Bay Area counties (06-075, 081, 001, 013, 085, 041).
+- Each view has fixed lon/lat bounds in code and its own equirectangular projection (scaled by cos(lat) at the
+  view centre) into `0 0 1000 1000`. Output `web/geo/{sf,eastbay,sj}.json`: view, source, projection params,
+  viewBox, land paths (clipped to the box + 10, simplified at 0.8 units), 3–4 landmarks. Sizes: sf 1,455 B
+  (2 shapes), eastbay 2,120 B (3 shapes), sj 599 B
+  (1 shape) — the 1:500k file is already coarse, which suits the "plain" map in DESIGN.md §6.
+- **Deviation from the plan's wording:** station positions are **not** written to `web/geo`; the browser projects
+  them with the same parameters (`web/js/map/project.js` mirrors `geo.build.project`), so new stations need no
+  rebuild. Decision row added to IMPLEMENTATION_PLAN §0.
+- `tests/test_geo.py` (5 pass): projection fits the view box, simplify keeps endpoints and reduces points, clip to a
+  rectangle, document shape, and every station in `tests/web/fixtures/live.json` projects inside 0..1000 of its view.
+  Host tests now 42 pass / 1 skip.
+- Note for the map renderer: county shapes share internal borders (e.g. SF / San Mateo); draw the shoreline stroke
+  first and the land fills on top so only the coast shows.
+
+**Next**
+- F2 map rendering, KPI tiles, legend, regions, list view, details, keyboard, polling/stale banner,
+  `tests/web/live-map.spec.js`, then the spot-check.
+
+## 2026-10-08 · F2 · live station map, list view, KPI tiles
+**Did**
+- Live page (`web/index.html`, `js/live/*.js`, `js/map/map.js`, `css/map.css`, F2 parts of `css/components.css`):
+  page title + freshness pill; KPI tiles Empty now · Full now · Open alerts (`alerts.json` `open`) · Bikes available,
+  each with an ⓘ definition; stale banner; map card with region segmented control (San Francisco · East Bay ·
+  San José, remembered in `localStorage` and mirrored in the URL), `Map | List` and a "Show only problems" chip;
+  legend with live counts per state + caption; a polite `aria-live` summary ("San Francisco: 54 empty, 12 full,
+  28 offline") that only changes when the counts do.
+- Map: SVG land from `web/geo/<view>.json` (2 px shoreline stroke under the land fill, so county borders vanish),
+  landmarks with a canvas halo, one `<circle>` per station coloured by `state` from `live.json` (never recomputed),
+  1 px casing, 1.35× for every non-ok state, draw order ok → offline → low/high → empty/full (four tier groups),
+  offline = dashed `mute` ring. Sizes are screen pixels: a `ResizeObserver` sets `--u` (view-box units per px) and
+  `--r-ok` (`clamp(3px, 0.45 % of map width, 5px)`), CSS turns them into radii, strokes and label sizes.
+- Map aspect ratio per breakpoint (4:5, 1:1, 4:3, 16:10) with the square view box drawn `meet`; the geo build now
+  keeps land 320 units beyond the box (`LAND_MARGIN`) so the extra width/height shows real coastline instead of a
+  cut edge. Files are still tiny (sf 2.8 KB, eastbay 3.8 KB, sj 0.6 KB).
+- Interaction: hover/click pick the nearest station within 10 px (22 px for touch), so tiny markers are easy to hit;
+  no wheel/pinch handlers (the map never captures page scroll). Roving tabindex: one marker in the tab order, arrow
+  keys move to the nearest station in that direction, Enter opens details, Escape closes and keeps focus. Hover/focus
+  enlarge the marker 1.6×, add a 2 px ink ring and the name label.
+- Station details: tooltip pinned beside the marker (≥ 600 px), bottom sheet (`<dialog>`, focus returns to the
+  marker) on phones: name, code, state word + swatch, "15 bikes (2 e-bikes) · 0 docks", "Full for 26 min" when
+  `state_since` is set, "Last reported 7 min ago".
+- List view: `data-table` (Station · Code · State · Bikes · Docks · In state for · Last reported), header buttons
+  with `aria-sort`, sticky header and first column, scrolls inside its card; same region/problems filter; a station
+  name opens it on the map with details.
+- Refresh: the map listens to the shell's single 60 s `live.json` poll (`freshness.js` now also reports failures);
+  markers are keyed by station id and updated in place; a changed marker cross-fades its fill (200 ms) and pulses
+  once (600 ms), both off under reduced motion. `alerts.json` is re-read with each refresh. Stale banner when
+  `generated_at` is over 5 min old ("Live data paused — showing the state at 9:24 PM."; the Replay link is F5).
+  Skeletons while loading, error card with Retry, empty card when a region has no problem stations.
+- `tests/web/live-map.spec.js`: the 10 required tests plus 3 (empty-problems card, error + Retry, axe 0 violations
+  with tooltip / list / phone sheet open in both themes). 13/13 pass, 39/39 with `--repeat-each=3`; the shell suite
+  (axe + no horizontal scroll on the new Live page) still 9/9. Every expected number comes from the fixture.
+- 18 new entries in `docs/DESIGN_BACKLOG.md` (#15–#32), e.g. what "Show only problems" includes, controls in a
+  toolbar row instead of over the map, no sliding segmented thumb, static skeletons.
+
+**Tried and changed**
+- Chrome made the `<svg>` itself a tab stop before the roving marker; `tabindex="-1"` on the svg fixed it.
+- The map card is a grid; a wide list table widened it to its min-content width (175 px horizontal page scroll at
+  320 px). `grid-template-columns: minmax(0, 1fr)` keeps the table scrolling inside its wrapper.
+- The name label showed next to an open tooltip that already starts with the name; the label now follows hover and
+  focus only.
+- A radius check read `r.baseVal` (0, because `r` comes from CSS); the test reads the computed `r` instead.
+
+**Next**
+- M3 (ops DB + Debezium CDC) in the next loop; F3 alerts rail later (`.live-layout` is the hook for its column).
+
+## 2026-10-08 · M2 · spot-check: 10 stations vs the public feed
+**Did** (the manual *Done when* check for M2/F2, once)
+- Stopped state: `status-stream` not running. `python tasks.py catchup` at 05:31:32 UTC processed the backlog in
+  33 s (exit 0, no `SQLITE` or `CommitStateUnknown` in the output). The running exporter then wrote `live.json` at
+  05:33:01 UTC with `data_as_of` 05:30:02 UTC (10:30 PM Pacific).
+- For each station, the raw archive object for the same feed snapshot (`raw/gbfs/station_status/…/1791437402.json.gz`,
+  i.e. exactly what the producer fetched from the public feed) was compared with `live.json`. A fresh fetch of the
+  public `station_status` feed (last_updated 05:32:02 UTC, 2 min newer) was compared too.
+- Stations: first by name per view and state, across all three views and six states.
+
+| View | Code | Station | State in live.json | live.json bikes / e-bikes / docks | Public feed, same snapshot | Public feed 2 min later |
+|---|---|---|---|---|---|---|
+| sf | SF-H29 | 2nd St at Folsom St | empty | 0 / 0 / 33 | 0 / 0 / 33 ✅ | 0 / 0 / 33 |
+| sf | SF-P21 | 20th St at Dolores St | full | 27 / 10 / 0 | 27 / 10 / 0 ✅ | 27 / 10 / 0 |
+| sf | SF-N22-1A | 16th St Mission BART South | low | 2 / 2 / 8 | 2 / 2 / 8 ✅ | 2 / 2 / 8 |
+| sf | SF-Y30 | Jennings St at Revere Ave | offline | 0 / 0 / 16 | 0 / 0 / 16 ✅ | 0 / 0 / 16 |
+| sf | SF-M11 | 10th Ave at Irving St | ok | 5 / 5 / 18 | 5 / 5 / 18 ✅ | 5 / 5 / 18 |
+| eastbay | OK-L6-2 | 13th St at Webster St | empty | 0 / 0 / 19 | 0 / 0 / 19 ✅ | 0 / 0 / 19 |
+| eastbay | BK-D2 | 10th St at University Ave | high | 18 / 8 / 1 | 18 / 8 / 1 ✅ | 18 / 8 / 1 |
+| eastbay | OK-L11 | 10th Ave at E 15th St | ok | 12 / 4 / 3 | 12 / 4 / 3 ✅ | 12 / 4 / 3 |
+| sj | SJ-N6 | Auzerais Ave at Los Gatos Creek Trail | full | 23 / 10 / 0 | 23 / 10 / 0 ✅ | 23 / 10 / 0 |
+| sj | SJ-I14 | 23rd St at Taylor St | low | 1 / 1 / 18 | 1 / 1 / 18 ✅ | 1 / 1 / 18 |
+
+- Result: **10/10 match** the public feed for the same snapshot, and the states agree with the rule
+  (SF-Y30 is offline because the feed says `is_renting: 0` and its last report was 1 h 46 min before the snapshot).
+  None of the 10 had changed in the 2 minutes since, so the newer fetch shows no drift for them; with `stream`
+  stopped, `live.json` only moves when `catchup` runs, so drift grows with the time since the last catch-up.
+- The comparison script lived in the session scratch folder (not committed): it reads `web/data/live.json`,
+  `archive.get(archive_key("station_status", ts))` and `GbfsClient.fetch("station_status")`.
+
+## 2026-10-08 · Note · a stray `C:\c` folder was deleted without checking it first
+- While taking screenshots during the F1 work (2026-10-08), Node resolved a Git-Bash path `/c/Users/...` as
+  `C:\c\Users\...`, so Playwright created `C:\c\...\scratchpad\shots`. The screenshots were moved out and the folder
+  was removed with `rm -rf /c/c` (= `C:\c`) **without first checking whether `C:\c` existed before or held anything
+  else**. When listed just before deletion it only contained the freshly created path, so it was probably new, but
+  that was not verified. The user was told in that iteration's build notes.
+- Since then: scripts pass Windows-style paths to Node, nothing outside the project or the session scratch folder
+  is deleted, and a stray folder created by a tool is left in place and reported instead.

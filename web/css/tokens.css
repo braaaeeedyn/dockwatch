@@ -1,0 +1,212 @@
+/* DockWatch design tokens, written by hand from the docs/DESIGN.md v1.0 front matter.
+   Light is the default. Dark applies when the system asks for it (prefers-color-scheme) unless the visitor
+   picked light with the toggle ([data-theme="light"]), or whenever they picked dark ([data-theme="dark"]).
+   The dark block is repeated on purpose: no build step, so no mixins. Keep both copies identical. */
+
+:root {
+  color-scheme: light;
+
+  /* Interface (chrome) — light */
+  --canvas: #ffffff;
+  --surface: #f4f5f7;
+  --surface-2: #eaecef;
+  --hairline: #dfe2e6;
+  --ink: #111418;
+  --on-ink: #ffffff;
+  --body: #4b5563;
+  --mute: #626a75;
+  --focus: #111418;
+  --map-water: #f4f5f7;
+  --map-land: #ffffff;
+  --map-shoreline: #c9ced4;
+  --marker-casing: #111418;
+
+  /* Data: station state — light */
+  --state-empty: #d55e00;
+  --state-low: #e69f00;
+  --state-ok: #8c959f;
+  --state-high: #56b4e9;
+  --state-full: #0072b2;
+  --state-text-empty: #b84f00;
+  --state-text-full: #0072b2;
+
+  /* Sequential ramps (heatmaps) — light */
+  --seq-empty-1: #fbeee5;
+  --seq-empty-2: #f4c7a6;
+  --seq-empty-3: #eb9a62;
+  --seq-empty-4: #d55e00;
+  --seq-empty-5: #8f3f00;
+  --seq-full-1: #e6f1f8;
+  --seq-full-2: #b3d4ea;
+  --seq-full-3: #6aaed6;
+  --seq-full-4: #0072b2;
+  --seq-full-5: #00466e;
+
+  /* Pipeline status (and the freshness dot) — light */
+  --status-ok: #1a7f37;
+  --status-warn: #8a5c00;
+  --status-fail: #c62828;
+
+  /* Charts — light */
+  --gridline: #eceef1;
+  --series-primary: var(--ink);
+  --series-secondary: var(--mute);
+  --threshold: var(--status-fail);
+
+  /* Elevation — light */
+  --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.10);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --raised-bg: var(--canvas);
+  --raised-border: transparent;
+
+  /* Typography */
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+  --fs-display-xl: clamp(1.75rem, 1.35rem + 1.6vw, 2.5rem);
+  --fs-display-lg: clamp(1.375rem, 1.2rem + 0.8vw, 1.75rem);
+  --fs-display-md: 1.25rem;
+  --fs-stat: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
+  --fs-body-lg: 1.125rem;
+  --fs-body-md: 1rem;
+  --fs-body-sm: 0.875rem;
+  --fs-caption: 0.75rem;
+  --fs-eyebrow: 0.75rem;
+  --fs-data: 0.875rem;
+  --fs-code: 0.875rem;
+  --fs-map-label: clamp(0.6875rem, 0.62rem + 0.25vw, 0.8125rem);
+
+  /* Shape */
+  --radius-none: 0px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-full: 999px;
+
+  /* Spacing (4 px base) */
+  --space-xxs: 4px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+  --space-4xl: 48px;
+  --space-5xl: 64px;
+  --gutter: clamp(16px, 4vw, 32px);
+  --section: clamp(40px, 5vw, 80px);
+  --grid-gap: clamp(12px, 2vw, 20px);
+  --card-padding: clamp(16px, 2.2vw, 24px);
+
+  /* Layout */
+  --container: 1280px;
+  --nav-height: 56px;
+  --touch-target: 44px;
+  /* breakpoints (media queries can't read variables): sm 600px, md 768px, lg 1120px */
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --canvas: #0e1116;
+    --surface: #161b22;
+    --surface-2: #1f262f;
+    --hairline: #2b333d;
+    --ink: #e8ecf1;
+    --on-ink: #0e1116;
+    --body: #b4bcc6;
+    --mute: #8b95a1;
+    --focus: #e8ecf1;
+    --map-water: #0e1116;
+    --map-land: #1b2129;
+    --map-shoreline: #3a434e;
+    --marker-casing: #0e1116;
+
+    --state-empty: #ff7a33;
+    --state-low: #f0b429;
+    --state-ok: #6e7781;
+    --state-high: #7cc6f0;
+    --state-full: #3d9be0;
+    --state-text-empty: #ff7a33;
+    --state-text-full: #3d9be0;
+
+    --seq-empty-1: #2a1d14;
+    --seq-empty-2: #5c3214;
+    --seq-empty-3: #9a4a12;
+    --seq-empty-4: #d55e00;
+    --seq-empty-5: #ff9a5c;
+    --seq-full-1: #14202a;
+    --seq-full-2: #163a54;
+    --seq-full-3: #155c8a;
+    --seq-full-4: #0072b2;
+    --seq-full-5: #5fb0ea;
+
+    --status-ok: #3fb950;
+    --status-warn: #d29922;
+    --status-fail: #ff6b5e;
+
+    --gridline: #232a33;
+
+    /* dark-note: floating things use surface-2 + a hairline border instead of a shadow */
+    --shadow-1: none;
+    --shadow-2: none;
+    --raised-bg: var(--surface-2);
+    --raised-border: var(--hairline);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0e1116;
+  --surface: #161b22;
+  --surface-2: #1f262f;
+  --hairline: #2b333d;
+  --ink: #e8ecf1;
+  --on-ink: #0e1116;
+  --body: #b4bcc6;
+  --mute: #8b95a1;
+  --focus: #e8ecf1;
+  --map-water: #0e1116;
+  --map-land: #1b2129;
+  --map-shoreline: #3a434e;
+  --marker-casing: #0e1116;
+
+  --state-empty: #ff7a33;
+  --state-low: #f0b429;
+  --state-ok: #6e7781;
+  --state-high: #7cc6f0;
+  --state-full: #3d9be0;
+  --state-text-empty: #ff7a33;
+  --state-text-full: #3d9be0;
+
+  --seq-empty-1: #2a1d14;
+  --seq-empty-2: #5c3214;
+  --seq-empty-3: #9a4a12;
+  --seq-empty-4: #d55e00;
+  --seq-empty-5: #ff9a5c;
+  --seq-full-1: #14202a;
+  --seq-full-2: #163a54;
+  --seq-full-3: #155c8a;
+  --seq-full-4: #0072b2;
+  --seq-full-5: #5fb0ea;
+
+  --status-ok: #3fb950;
+  --status-warn: #d29922;
+  --status-fail: #ff6b5e;
+
+  --gridline: #232a33;
+
+  --shadow-1: none;
+  --shadow-2: none;
+  --raised-bg: var(--surface-2);
+  --raised-border: var(--hairline);
+}

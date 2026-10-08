@@ -27,6 +27,59 @@ def terraform(*args: str) -> None:
     sh("docker", "run", "--rm", "-v", f"{infra}:/work", "-w", "/work", TF_IMAGE, *args)
 
 
+def stream_running() -> bool:
+    out = subprocess.run(
+        ["docker", "compose", "--profile", "spark", "ps", "-q", "--status", "running", "status-stream"],
+        capture_output=True,
+        text=True,
+    )
+    return bool(out.stdout.strip())
+
+
+def catchup() -> None:
+    """Process the Kafka backlog with the same job, image and checkpoints as `stream`, then exit (availableNow)."""
+    if stream_running():
+        print("status-stream is running; stop it first (python tasks.py stream-stop): one Spark JVM at a time.")
+        sys.exit(1)
+    sh(
+        "docker",
+        "compose",
+        "--profile",
+        "spark",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-e",
+        "DOCKWATCH_TRIGGER_MODE=available_now",
+        "status-stream",
+    )
+
+
+def spark_inspect(*args: str) -> None:
+    """inspect_tables.py in a single small JVM; `--check` (verify-lake) exits 1 if the lake is not consistent."""
+    sh(
+        "docker",
+        "compose",
+        "--profile",
+        "spark",
+        "run",
+        "--rm",
+        "--no-deps",
+        "status-stream",
+        "/opt/spark/bin/spark-submit",
+        "--master",
+        "local[1]",
+        "--driver-memory",
+        "1g",
+        # Whole-stage codegen makes this JVM segfault (SymbolTable::do_lookup) on the COUNT(DISTINCT ...) queries;
+        # see DEVLOG 2026-10-07 "JVM crash".
+        "--conf",
+        "spark.sql.codegen.wholeStage=false",
+        "/opt/dockwatch/src/dockwatch/streaming/inspect_tables.py",
+        *args,
+    )
+
+
 TASKS = {
     "lint": lambda *a: (uv("ruff", "check", "."), uv("ruff", "format", "--check", ".")),
     "fmt": lambda *a: (uv("ruff", "format", "."), uv("ruff", "check", "--fix", ".")),
@@ -88,27 +141,11 @@ TASKS = {
         "/opt/dockwatch/src/dockwatch/streaming/sql.py",
         *a,
     ),
-    "inspect": lambda *a: sh(
-        "docker",
-        "compose",
-        "--profile",
-        "spark",
-        "run",
-        "--rm",
-        "--no-deps",
-        "status-stream",
-        "/opt/spark/bin/spark-submit",
-        "--master",
-        "local[1]",
-        "--driver-memory",
-        "1g",
-        # Whole-stage codegen makes this JVM segfault (SymbolTable::do_lookup) on the COUNT(DISTINCT ...) queries;
-        # see DEVLOG 2026-10-07 "JVM crash".
-        "--conf",
-        "spark.sql.codegen.wholeStage=false",
-        "/opt/dockwatch/src/dockwatch/streaming/inspect_tables.py",
-    ),
+    "inspect": lambda *a: spark_inspect(),
+    "verify-lake": lambda *a: spark_inspect("--check", *a),
+    "catchup": lambda *a: catchup(),
     "export": lambda *a: uv("python", "-m", "dockwatch.exporter", *a),
+    "geo": lambda *a: uv("--group", "geo", "python", "-m", "dockwatch.geo", *a),
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),
 }

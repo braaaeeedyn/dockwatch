@@ -1,0 +1,294 @@
+/* Live station map (DESIGN.md §6): map card, toolbar, SVG land and markers, tooltip, legend, list view.
+   Sizes on the map are given in CSS pixels and converted to view-box units with --u (view-box units per CSS pixel),
+   which js/map/map.js sets from a ResizeObserver, together with --r-ok (the ok-marker radius in px). */
+
+.live-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--grid-gap);
+  /* F3 adds the alerts rail: two columns (map ≈ 2/3, rail ≈ 1/3) from 1120 px. */
+}
+
+/* ---- Map card ---- */
+.map-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr); /* a wide table scrolls inside its wrapper instead of widening the card */
+  background: var(--map-water);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.map-card [hidden] {
+  display: none !important;
+}
+
+.map-card:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---- Toolbar: region switch left; Map | List and "Show only problems" right; wraps on narrow cards ---- */
+.map-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+}
+
+.map-toolbar__end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+/* map-controls: canvas + hairline + level-1 shadow, floating over the water. */
+.map-toolbar .segmented,
+.map-toolbar .chip:not([aria-pressed="true"]) {
+  background: var(--canvas);
+  box-shadow: var(--shadow-1);
+}
+
+.map-toolbar .segmented__option input:checked + span,
+:root[data-theme="dark"] .map-toolbar .segmented__option input:checked + span {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.map-toolbar .chip:not([aria-pressed="true"]):hover {
+  background: var(--surface-2);
+}
+
+/* ---- Empty / error message ---- */
+.map-message {
+  display: grid;
+  gap: var(--space-md);
+  justify-items: start;
+  margin: 0 var(--space-md) var(--space-md);
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+}
+
+.map-message p {
+  color: var(--body);
+}
+
+/* ---- Map frame: aspect ratio per breakpoint (DESIGN §4) ---- */
+.map-frame {
+  position: relative;
+  aspect-ratio: 4 / 5;
+  background: var(--map-water);
+  overflow: hidden;
+}
+
+@media (min-width: 600px) {
+  .map-frame {
+    aspect-ratio: 1 / 1;
+  }
+}
+
+@media (min-width: 768px) {
+  .map-frame {
+    aspect-ratio: 4 / 3;
+  }
+}
+
+@media (min-width: 1120px) {
+  .map-frame {
+    aspect-ratio: 16 / 10;
+  }
+}
+
+.map-skeleton {
+  position: absolute;
+  inset: var(--space-md);
+  border-radius: var(--radius-lg);
+}
+
+.map-card:not(.is-loading) .map-skeleton {
+  display: none;
+}
+
+/* ---- SVG ---- */
+.map {
+  --u: 1;
+  --r-ok: 4px;
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.map.is-pointing {
+  cursor: pointer;
+}
+
+/* Shoreline trick: a 2 px stroke under the fill leaves 1 px outside the coast and hides county borders. */
+.map__shore {
+  fill: none;
+  stroke: var(--map-shoreline);
+  stroke-width: calc(2px * var(--u));
+  stroke-linejoin: round;
+}
+
+.map__land {
+  fill: var(--map-land);
+}
+
+.map__landmark,
+.map__label {
+  font-family: var(--font-sans);
+  font-size: calc(var(--fs-map-label) * var(--u));
+  font-weight: 500;
+  paint-order: stroke;
+  stroke: var(--canvas);
+  stroke-width: calc(6px * var(--u)); /* 3 px halo outside the glyphs */
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.map__landmark {
+  fill: var(--mute);
+}
+
+.map__label {
+  --m: 1;
+  fill: var(--ink);
+  transform: translateY(calc((var(--r-ok) * var(--m) * -1.6 - 6px) * var(--u)));
+}
+
+/* ---- Markers ---- */
+.marker {
+  r: calc(var(--r-ok) * var(--u));
+  fill: var(--state-ok);
+  stroke: var(--marker-casing);
+  stroke-width: calc(1px * var(--u));
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill var(--duration-base) var(--ease-standard);
+  cursor: pointer;
+}
+
+.marker.is-problem {
+  r: calc(var(--r-ok) * 1.35 * var(--u));
+}
+
+.marker.is-active {
+  r: calc(var(--r-ok) * 1.6 * var(--u));
+}
+
+.marker.is-problem.is-active {
+  r: calc(var(--r-ok) * 1.35 * 1.6 * var(--u));
+}
+
+.marker[data-state="empty"] {
+  fill: var(--state-empty);
+}
+
+.marker[data-state="low"] {
+  fill: var(--state-low);
+}
+
+.marker[data-state="high"] {
+  fill: var(--state-high);
+}
+
+.marker[data-state="full"] {
+  fill: var(--state-full);
+}
+
+.marker[data-state="offline"] {
+  fill: transparent;
+  stroke: var(--mute);
+  stroke-width: calc(1.5px * var(--u));
+  stroke-dasharray: calc(2px * var(--u)) calc(1.5px * var(--u));
+}
+
+/* The ink ring (and the name label) is the focus indicator for markers. */
+.marker:focus,
+.marker:focus-visible {
+  outline: none;
+}
+
+.map__ring {
+  --m: 1;
+  r: calc((var(--r-ok) * var(--m) * 1.6 + 3px) * var(--u)); /* 2 px ring, 2 px offset */
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: calc(2px * var(--u));
+  pointer-events: none;
+}
+
+/* ---- Tooltip (tablet / desktop station details), pinned beside the marker ---- */
+.map-tooltip {
+  --tx: 0%;
+  --ty: -50%;
+  position: absolute;
+  z-index: 5;
+  width: max-content;
+  max-width: min(280px, 46%);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--ink);
+  color: var(--on-ink);
+  box-shadow: var(--shadow-1);
+  transform: translate(var(--tx), var(--ty));
+  font-variant-numeric: tabular-nums;
+}
+
+.map-tooltip[data-side="left"] {
+  --tx: -100%;
+}
+
+.map-tooltip[data-vertical="top"] {
+  --ty: -16px;
+}
+
+.map-tooltip[data-vertical="bottom"] {
+  --ty: calc(-100% + 16px);
+}
+
+.map-tooltip .details__reported {
+  color: var(--on-ink);
+}
+
+/* ---- List view ---- */
+.map-list {
+  padding: 0 var(--space-md) var(--space-md);
+}
+
+/* ---- Legend + caption under the map ---- */
+.map-footer {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  background: var(--canvas);
+  border-top: 1px solid var(--hairline);
+}
+
+.legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  font-size: var(--fs-body-sm);
+  line-height: 1.45;
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.legend .data {
+  color: var(--body);
+}

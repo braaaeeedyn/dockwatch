@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>DockWatch · Live station status</title>
+    <meta name="description" content="Which Bay Wheels stations are empty or full right now.">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff">
+    <script>
+      // Apply a remembered theme before first paint (see js/theme.js).
+      try {
+        var t = localStorage.getItem("dockwatch-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <link rel="preload" href="fonts/ibm-plex-sans-latin-600.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/map.css">
+    <script type="module" src="js/main.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#map">Skip to map</a>
+    <header class="site-header">
+      <nav class="nav container" aria-label="Main">
+        <a class="nav__wordmark" href="index.html" translate="no">DockWatch</a>
+        <ul class="nav__links" role="list">
+          <li><a href="index.html" aria-current="page">Live</a></li>
+          <li><a href="insights.html">Insights</a></li>
+          <li><a href="pipeline.html">Pipeline</a></li>
+          <li><a href="about.html">About</a></li>
+        </ul>
+        <div class="nav__tools">
+          <p class="freshness" data-freshness data-state="loading">
+            <span class="freshness__dot" aria-hidden="true"></span>
+            <span class="freshness__text"><span data-freshness-word>Loading…</span><span data-freshness-time></span></span>
+          </p>
+          <button type="button" class="icon-button theme-toggle" data-theme-toggle aria-label="Switch theme">
+            <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg>
+            <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>
+          </button>
+          <button type="button" class="icon-button nav__menu-button" data-nav-open aria-label="Open menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="nav-menu">
+            <svg class="icon icon-menu" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5h16" /><path d="M4 12h16" /><path d="M4 19h16" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+    <dialog class="nav-menu" id="nav-menu" aria-label="Menu">
+      <div class="container">
+        <div class="nav-menu__top">
+          <a class="nav__wordmark" href="index.html" translate="no">DockWatch</a>
+          <button type="button" class="icon-button" data-nav-close aria-label="Close menu">
+            <svg class="icon icon-x" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+          </button>
+        </div>
+        <nav aria-label="Menu">
+          <ul class="nav-menu__links" role="list">
+            <li><a href="index.html" aria-current="page">Live</a></li>
+            <li><a href="insights.html">Insights</a></li>
+            <li><a href="pipeline.html">Pipeline</a></li>
+            <li><a href="about.html">About</a></li>
+          </ul>
+        </nav>
+        <div class="nav-menu__footer">
+          <button type="button" class="button-secondary theme-toggle" data-theme-toggle>
+            <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg>
+            <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>
+            <span data-theme-toggle-label>Switch theme</span>
+          </button>
+        </div>
+      </div>
+    </dialog>
+    <main id="content" class="container">
+      <header class="page-header">
+        <div class="page-header__title-row">
+          <h1>Live station status</h1>
+          <p class="freshness" data-freshness data-state="loading">
+            <span class="freshness__dot" aria-hidden="true"></span>
+            <span class="freshness__text"><span data-freshness-word>Loading…</span><span data-freshness-time></span></span>
+          </p>
+        </div>
+        <p class="lede">Which Bay Wheels stations have no bikes or no docks right now, updated every minute.</p>
+      </header>
+
+      <div class="banner banner--warn" data-stale-banner role="status" hidden>
+        <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>
+        <p>Live data paused — showing the state at <span class="data" data-stale-time></span>.</p>
+      </div>
+
+      <section class="kpis" data-kpis aria-labelledby="kpis-title" aria-busy="true">
+        <h2 id="kpis-title" class="visually-hidden">Right now, all regions</h2>
+        <div class="kpi-grid">
+          <div class="stat-tile" data-kpi="empty">
+            <div class="stat-tile__head">
+              <h3 class="stat-tile__label eyebrow"><span class="swatch" data-state="empty" aria-hidden="true"></span>Empty now</h3>
+              <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-empty" aria-label="What “Empty now” means">
+                <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+              </button>
+            </div>
+            <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+            <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+            <p class="stat-tile__def" id="kpi-def-empty" hidden>Stations reporting 0 bikes to rent in the latest feed snapshot, across San Francisco, the East Bay and San José.</p>
+          </div>
+          <div class="stat-tile" data-kpi="full">
+            <div class="stat-tile__head">
+              <h3 class="stat-tile__label eyebrow"><span class="swatch" data-state="full" aria-hidden="true"></span>Full now</h3>
+              <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-full" aria-label="What “Full now” means">
+                <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+              </button>
+            </div>
+            <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+            <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+            <p class="stat-tile__def" id="kpi-def-full" hidden>Stations reporting 0 free docks in the latest feed snapshot, so riders can’t return a bike there.</p>
+          </div>
+          <div class="stat-tile" data-kpi="alerts">
+            <div class="stat-tile__head">
+              <h3 class="stat-tile__label eyebrow">Open alerts</h3>
+              <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-alerts" aria-label="What “Open alerts” means">
+                <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+              </button>
+            </div>
+            <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+            <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+            <p class="stat-tile__def" id="kpi-def-alerts" hidden>An alert opens when a station stays empty or full for 15 minutes, and closes when it recovers.</p>
+          </div>
+          <div class="stat-tile" data-kpi="bikes">
+            <div class="stat-tile__head">
+              <h3 class="stat-tile__label eyebrow">Bikes available</h3>
+              <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-bikes" aria-label="What “Bikes available” means">
+                <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+              </button>
+            </div>
+            <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+            <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+            <p class="stat-tile__def" id="kpi-def-bikes" hidden>Bikes ready to rent right now at every station, classic bikes and e-bikes together.</p>
+          </div>
+        </div>
+        <p class="caption">All three regions. From live.json and alerts.json, written by the DockWatch exporter every minute.</p>
+      </section>
+
+      <!-- Desktop: the map spans the content width for now. F3 adds the alerts rail as a second column of .live-layout. -->
+      <div class="live-layout">
+        <section id="map" class="map-card is-loading" tabindex="-1" aria-labelledby="map-title" data-view="map">
+          <h2 id="map-title" class="visually-hidden">Station map</h2>
+          <div class="map-toolbar">
+            <fieldset class="segmented" data-region-control>
+              <legend class="visually-hidden">Region</legend>
+              <label class="segmented__option"><input type="radio" name="region" value="sf" checked><span>San Francisco</span></label>
+              <label class="segmented__option"><input type="radio" name="region" value="eastbay"><span>East Bay</span></label>
+              <label class="segmented__option"><input type="radio" name="region" value="sj"><span>San José</span></label>
+            </fieldset>
+            <div class="map-toolbar__end">
+              <fieldset class="segmented" data-view-control>
+                <legend class="visually-hidden">Show stations as</legend>
+                <label class="segmented__option"><input type="radio" name="view" value="map" checked><span>Map</span></label>
+                <label class="segmented__option"><input type="radio" name="view" value="list"><span>List</span></label>
+              </fieldset>
+              <button type="button" class="chip" data-problems-toggle aria-pressed="false">Show only problems</button>
+            </div>
+          </div>
+
+          <div class="map-message card-soft" data-map-message role="status" hidden></div>
+
+          <div class="map-stage" data-map-stage aria-busy="true">
+            <div class="map-frame" data-map-frame>
+              <svg class="map" data-map-svg tabindex="-1" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Station markers. Arrow keys move between nearby stations, Enter opens details." xmlns="http://www.w3.org/2000/svg">
+                <path class="map__shore" data-shore d="" aria-hidden="true" />
+                <path class="map__land" data-land d="" aria-hidden="true" />
+                <g class="map__landmarks" data-landmarks aria-hidden="true"></g>
+                <g class="map__markers">
+                  <g data-tier="0"></g>
+                  <g data-tier="1"></g>
+                  <g data-tier="2"></g>
+                  <g data-tier="3"></g>
+                </g>
+                <g class="map__overlay" aria-hidden="true">
+                  <circle class="map__ring" data-ring="selected" cx="0" cy="0" visibility="hidden" />
+                  <circle class="map__ring" data-ring="highlight" cx="0" cy="0" visibility="hidden" />
+                  <text class="map__label" data-marker-label x="0" y="0" visibility="hidden"></text>
+                </g>
+              </svg>
+              <div class="map-skeleton skeleton" aria-hidden="true"></div>
+              <div class="map-tooltip details" data-tooltip hidden></div>
+            </div>
+          </div>
+
+          <div class="map-list" data-list-view hidden>
+            <div class="table-wrap" role="region" aria-labelledby="list-caption" tabindex="0">
+              <table class="data-table">
+                <caption id="list-caption" class="visually-hidden">Stations</caption>
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="map-footer">
+            <ul class="legend" data-legend role="list" aria-label="Stations per state in this region">
+              <li class="legend__item"><span class="swatch" data-state="empty" aria-hidden="true"></span>Empty · <span class="data" data-legend-count="empty">–</span></li>
+              <li class="legend__item"><span class="swatch" data-state="low" aria-hidden="true"></span>Low · <span class="data" data-legend-count="low">–</span></li>
+              <li class="legend__item"><span class="swatch" data-state="ok" aria-hidden="true"></span>OK · <span class="data" data-legend-count="ok">–</span></li>
+              <li class="legend__item"><span class="swatch" data-state="high" aria-hidden="true"></span>High · <span class="data" data-legend-count="high">–</span></li>
+              <li class="legend__item"><span class="swatch" data-state="full" aria-hidden="true"></span>Full · <span class="data" data-legend-count="full">–</span></li>
+              <li class="legend__item"><span class="swatch" data-state="offline" aria-hidden="true"></span>Offline · <span class="data" data-legend-count="offline">–</span></li>
+            </ul>
+            <p class="caption">Empty = no bikes, low = few bikes, high = few free docks, full = no free docks. Station status from the Bay Wheels GBFS feed, processed by DockWatch. Times are Pacific time.</p>
+          </div>
+          <p class="visually-hidden" aria-live="polite" data-map-summary></p>
+        </section>
+      </div>
+    </main>
+    <dialog class="sheet" data-sheet aria-labelledby="sheet-title">
+      <div class="sheet__handle" aria-hidden="true"></div>
+      <div class="sheet__head">
+        <h2 class="sheet__title" id="sheet-title" data-sheet-title></h2>
+        <button type="button" class="icon-button" data-sheet-close aria-label="Close station details">
+          <svg class="icon icon-x" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+        </button>
+      </div>
+      <div class="sheet__body details" data-sheet-body></div>
+    </dialog>
+    <footer class="site-footer">
+      <div class="container site-footer__inner">
+        <div>
+          <p>Bay Wheels data provided according to the <a href="https://www.lyft.com/bikes/bay-wheels/data-license-agreement">Bay Wheels License Agreement</a>.</p>
+          <p>Not affiliated with Lyft or Bay Wheels.</p>
+        </div>
+        <div>
+          <p class="data" data-data-through>Data through …</p>
+          <p>Times are Pacific time.</p>
+        </div>
+        <div>
+          <p><a href="https://github.com/braaaeeedyn/dockwatch">DockWatch on GitHub</a></p>
+          <p><a href="about.html#sources">Data sources and licences</a></p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

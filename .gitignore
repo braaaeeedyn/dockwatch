@@ -31,3 +31,9 @@ crash.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# Node (Playwright tests)
+node_modules/
+test-results/
+playwright-report/
+playwright/.cache/
