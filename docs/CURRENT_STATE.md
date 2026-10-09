@@ -284,7 +284,7 @@ are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
   of the `python`, `web` and `web-repeat` jobs pass verbatim in Linux containers (`python:3.12-slim-bookworm` and
   `node:20-bookworm`, `CI=true`) on a copy of the working tree; the `spark` and `terraform` commands are the local
   `test-spark` / `tf-fmt-check` / `tf-validate` checks.
-- First run on GitHub: pending
+- First run on GitHub: **passed** — run 37875703602 on commit 9a42ba4 (2026-10-09 02:40–02:44 UTC), all five jobs green: Python lint + tests (12 s), Terraform fmt + validate (18 s), Spark transform tests (56 s), Playwright suite (2 min 28 s), Playwright repeat (alerts + shell) (3 min 22 s). https://github.com/braaaeeedyn/dockwatch/actions/runs/37875703602
 - **Not in CI:** `deploy.yml` (publishing `web/` to S3 needs the AWS account), `terraform plan` (needs the AWS
   account and the GitHub OIDC role), `dbt compile` (arrives with M5), the integration and network tests, the Kafka
   stack and `verify-lake`.

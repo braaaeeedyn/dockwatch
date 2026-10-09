@@ -695,3 +695,15 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
 `python`, `web` and `web-repeat` jobs pass verbatim in Linux containers (`python:3.12-slim-bookworm` with uv
 0.12.11; `node:20-bookworm` with `--ipc=host`, 4 GB, `CI=true`) on a copy of the working tree. `tf-fmt-check`,
 `tf-validate` and `test-spark` pass as local checks. The first run on GitHub is checked after the push.
+
+## 2026-10-08 · M6 (part) · first CI run on GitHub
+**Did**
+- Pushed loop C (commit 9a42ba4) to GitHub. The first `CI` run (37875703602) passed with all five jobs green:
+  Python lint + tests 12 s, Terraform fmt + validate 18 s, Spark transform tests 56 s, Playwright suite 2 min 28 s,
+  Playwright repeat (alerts + shell) 3 min 22 s; about 3.5 minutes in total.
+- Replaced "First run on GitHub: pending" in CURRENT_STATE with the run id and result.
+
+**Found**
+- During loop C the host ran out of memory twice: Claude Code's memory-pressure reaper stopped the GBFS producer
+  (twice), a Checker run (after 8 of 69 checks; it was re-run in full after memory was freed and all 69 passed) and
+  the CI-status poller. None of these were caused by the code under test. The producer is currently **not running**.
