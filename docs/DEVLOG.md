@@ -661,3 +661,37 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
 - Playwright 49/49 (shell 11, live map 14, touch targets 3, replay 8, alerts 13). The alerts file `--repeat-each 3`:
   39/39. The focus test `--repeat-each 5`: 5/5. The shell suite `--repeat-each 5`: 55/55. The focus and timeout tests
   fail when their fix is removed: no focus safety net, and no alerts read timeout.
+
+## 2026-10-08 · M6 (part) · CI on GitHub Actions
+
+**Done**
+- `.github/workflows/ci.yml`, on pushes to `main`, pull requests and `workflow_dispatch`, with five jobs:
+  `Python lint + tests` (ruff, `ruff format --check`, host pytest through `uv sync --locked`), `Spark transform tests`
+  (`docker build -t dockwatch-spark:3.5.5 infra/spark`, then `python tasks.py test-spark`), `Terraform fmt + validate`
+  (`python tasks.py tf-fmt-check` and `tf-validate`, both in the `hashicorp/terraform:1.9` image), `Playwright suite`
+  (all 49 tests) and `Playwright repeat (alerts + shell)` (`--repeat-each 3`).
+- `permissions: contents: read`, a per-ref `concurrency` group that cancels older runs, `ubuntu-24.04`, actions pinned
+  to major tags, job timeouts (10 / 20 / 10 / 30 / 30 min). No matrix, so check names stay fixed.
+- Caching: uv (`setup-uv` `enable-cache`, uv pinned to 0.12.11), npm (`setup-node` `cache: npm`) and the Playwright
+  browsers (`~/.cache/ms-playwright`, keyed on `package-lock.json`); `npx playwright install --with-deps chromium`
+  always runs, so the OS packages are there on a cache hit. On failure the web jobs upload `test-results/` (traces).
+- New task `python tasks.py tf-fmt-check` (`terraform fmt -check -recursive -diff`). README: CI badge, the task, and a
+  short CI note.
+
+**Decided**
+- **Retries 0 on the command line.** `playwright.config.js` has `retries: CI ? 1 : 0`, which would hide a flake on
+  GitHub. Both web jobs run `npx playwright test ... --retries=0`; the config is untouched, so the earlier
+  no-loosening guards (config byte-identical) still mean something.
+- **Spark tests in the Spark image**, the same `test-spark` command as locally, instead of a runner-side PySpark:
+  the Dockerfile stays the one source of versions (Spark 3.5.5, Java 17, pandas / pyarrow). The image is rebuilt each
+  run; exporting ~2.4 GB to the Actions cache would be slower than the build.
+- **Terraform without credentials:** `fmt -check` and `validate` (`init -backend=false`). `terraform plan` needs the
+  AWS account and the GitHub OIDC role, so it stays an unticked M6 item, as do `dbt compile` (M5) and `deploy.yml`
+  (out of scope: no AWS account to publish to).
+- Node 20 to match this machine, although Node 20 reached end of life in April 2026; moving local and CI to Node 22/24
+  together is a follow-up.
+
+**Verified locally** (nothing was pushed): actionlint 1.7.7 (with shellcheck) is clean. The run steps of the
+`python`, `web` and `web-repeat` jobs pass verbatim in Linux containers (`python:3.12-slim-bookworm` with uv
+0.12.11; `node:20-bookworm` with `--ipc=host`, 4 GB, `CI=true`) on a copy of the working tree. `tf-fmt-check`,
+`tf-validate` and `test-spark` pass as local checks. The first run on GitHub is checked after the push.

@@ -1,5 +1,7 @@
 # DockWatch
 
+[![CI](https://github.com/braaaeeedyn/dockwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/braaaeeedyn/dockwatch/actions/workflows/ci.yml)
+
 A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station status streams through Kafka, is
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
@@ -30,6 +32,7 @@ python tasks.py produce              # poll Bay Wheels GBFS -> Kafka + raw archi
 python tasks.py export               # live.json / alerts.json for the site, every 60 s
 python tasks.py geo                  # (once) Census map shapes -> web/geo/*.json (committed)
 python tasks.py replay-export        # "Replay a day": web/data/replay.json from the raw archive (no Spark; --date, --step)
+python tasks.py tf-fmt-check         # terraform fmt -check (Docker; tf-fmt rewrites, tf-validate validates)
 ```
 
 Spark (Kafka -> Iceberg, episodes, alerts) runs **on demand only** (one Spark JVM at a time; never restarted
@@ -52,6 +55,10 @@ python -m http.server 5179 --bind 127.0.0.1 --directory web   # http://127.0.0.1
 npm ci                               # Playwright 1.64.0 + axe (dev only)
 npx playwright test                  # shell + live map: layout, accessibility, behaviour (uses tests/web/fixtures)
 ```
+
+**CI** (`.github/workflows/ci.yml`, on pushes to `main` and on pull requests) runs ruff, `ruff format --check` and
+pytest, the Spark transform tests in the Spark image, `terraform fmt -check` + `validate`, the full Playwright suite
+and a repeat job for the alerts and shell specs. Playwright runs with `--retries=0`, so a flaky test shows up red.
 
 ## Data and licence
 - **Bay Wheels GBFS feeds** and **trip history**: Bay Wheels data is provided by Lyft Bikes and Scooters, LLC

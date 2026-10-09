@@ -239,9 +239,10 @@ shows the full graph.
 - [ ] `terraform apply` (after the manual AWS steps in M0). Point `DOCKWATCH_TARGET=aws` at S3 + Glue; run the stream
       for a day; query with Athena.
 - [ ] Lambda + SNS wired to `gbfs.alerts` through a tiny consumer.
-- [ ] GitHub Actions `ci.yml`: ruff, pytest (Spark transforms on fixtures), `dbt compile`, `terraform fmt -check` +
-      `validate` + `plan` (OIDC, no stored keys), Playwright smoke tests for the site. `deploy.yml` on `main`
-      publishes `web/` to S3 static hosting.
+- [x] GitHub Actions ci.yml: ruff, ruff format, pytest, Spark transform tests (Spark image), terraform fmt -check + validate, Playwright suite + repeat job, retries 0. (2026-10-08; first GitHub run checked after push)
+- [ ] ci.yml: dbt compile (when M5 adds dbt).
+- [ ] ci.yml: terraform plan via GitHub OIDC (needs the AWS account; no stored keys).
+- [ ] deploy.yml on main publishes web/ to S3 static hosting.
 - [ ] Measurements into `docs/METRICS.md` (each with the command that produced it):
       p50/p95 end-to-end latency; sustained throughput at 10× and 50× replay; file count and query time before vs.
       after compaction; Athena bytes scanned for a full backfill vs. one incremental month; restart with a zero-diff count.

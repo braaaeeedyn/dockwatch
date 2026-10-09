@@ -150,6 +150,7 @@ TASKS = {
     "geo": lambda *a: uv("--group", "geo", "python", "-m", "dockwatch.geo", *a),
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),
+    "tf-fmt-check": lambda *a: terraform("fmt", "-check", "-recursive", "-diff"),
 }
 
 

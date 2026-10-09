@@ -7,7 +7,7 @@
 
 **Last updated:** 2026-10-08 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
 partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
-44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · DESIGN.md v1.0.1
+44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`) ✅ · DESIGN.md v1.0.1
 
 ---
 
@@ -15,9 +15,13 @@ partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-ta
 
 | What | Why | Status |
 |---|---|---|
-| Nothing in progress | The Live page now has its alerts rail (F3). | Next: CI, then M3 (ops DB + Debezium CDC). |
+| Nothing in progress | CI now runs on GitHub Actions (`.github/workflows/ci.yml`; see *CI* below). | Next: M3 (ops DB + Debezium CDC). |
 
-Done most recently: **F3, the alerts rail** (`web/js/live/alerts.js`; see *Website* below).
+Done most recently: **CI on GitHub Actions** (`.github/workflows/ci.yml`, five jobs: lint + host tests, Spark
+transform tests, Terraform fmt + validate, the full Playwright suite with `--retries=0`, and a repeat job for the
+alerts and shell specs; see *CI* below). New task `python tasks.py tf-fmt-check`; README CI badge.
+
+Before that: **F3, the alerts rail** (`web/js/live/alerts.js`; see *Website* below).
 - **Rail per breakpoint:** from 1120 px the Live page is two columns, the map (≈ 2/3) and a sticky alerts rail
   (≈ 1/3) whose rows scroll inside it. From 600 to 1119 px the rail is a card under the map; its body scrolls inside
   (`min(36rem, 70dvh)`), and a container query gives two columns of rows in the wide card. Below 600 px a **peek bar**
@@ -76,7 +80,7 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next loop: CI (ruff, host pytest, Playwright), then M3 (ops DB + Debezium CDC).
+Next loop: M3 (ops DB + Debezium CDC).
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -215,7 +219,8 @@ Remote state backend commented out until the AWS account exists.
 - `tasks.py` (`Makefile` forwards): `lint`, `fmt`, `test`, `test-integration`, `test-spark`, `up [profile]`, `down`, `ps`,
   `setup`, `produce`, `produce-once`, `replay` (re-publish an archived day to Kafka), `stream`, `stream-logs`,
   `stream-stop`, `catchup`, `inspect`, `verify-lake`, `sql "<query>"`, `export`, `replay-export` (Replay a day file
-  from the archive), `geo`, `tf-fmt`, `tf-validate`.
+  from the archive), `geo`, `tf-fmt`, `tf-fmt-check` (`terraform fmt -check -recursive -diff`, for CI),
+  `tf-validate`.
 - **Host tests:** 53 pass, 1 skipped (`python tasks.py test`): GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
   replay builder (`tests/test_replay.py`, 7 tests: full first frame then deltas, the shared `classify()` rule, a
   Pacific day across two UTC partitions, decoded frames equal the snapshots, a synthetic full day of 641 stations ×
@@ -255,11 +260,42 @@ Remote state backend commented out until the AWS account exists.
 - `inspect`, `verify-lake` and `sql` run Spark with whole-stage codegen **off** (a JVM crash otherwise; see DEVLOG).
 - Lint: ruff, line length 120.
 
+### CI (`.github/workflows/ci.yml`, GitHub Actions)
+Runs on pushes to `main`, on pull requests and by hand (`workflow_dispatch`). Top-level `permissions: contents: read`;
+a newer run on the same ref cancels the older one (`concurrency: ci-<ref>`). Every job runs on `ubuntu-24.04`; actions
+are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
+
+| Job | Runs | Timeout |
+|---|---|---|
+| `Python lint + tests` | `astral-sh/setup-uv` (uv 0.12.11, Python 3.12), `uv sync --locked`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q` (the local commands) | 10 min |
+| `Spark transform tests` | `docker build -t dockwatch-spark:3.5.5 infra/spark`, then `python tasks.py test-spark` (same image and command as locally) | 20 min |
+| `Terraform fmt + validate` | `python tasks.py tf-fmt-check`, `python tasks.py tf-validate` (both in `hashicorp/terraform:1.9`, `init -backend=false`, no AWS credentials) | 10 min |
+| `Playwright suite` | Node 20, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --retries=0` (all 49 tests); uploads `test-results/` (traces) on failure | 30 min |
+| `Playwright repeat (alerts + shell)` | the same setup, then `npx playwright test tests/web/alerts.spec.js tests/web/shell.spec.js --repeat-each 3 --retries=0`, as its own red check if one of them flakes | 30 min |
+
+- **Retries 0:** `playwright.config.js` says `retries: CI ? 1 : 0`, so on GitHub (`CI=true`) a flaky test would pass
+  on its second try and stay hidden. Both web jobs pass `--retries=0` on the command line, which overrides the config;
+  the config itself is unchanged. `CI=true` still gives `forbidOnly`, the line reporter, a fresh test server and 2
+  workers.
+- **Caching:** uv's cache (`setup-uv` `enable-cache`), npm's cache (`setup-node` `cache: npm`) and the Playwright
+  browsers (`actions/cache` on `~/.cache/ms-playwright`, keyed on `package-lock.json`). The Spark image is rebuilt
+  each run (no Docker layer cache).
+- **Verified locally** (nothing is pushed during a loop): actionlint 1.7.7 (with shellcheck) is clean; the run steps
+  of the `python`, `web` and `web-repeat` jobs pass verbatim in Linux containers (`python:3.12-slim-bookworm` and
+  `node:20-bookworm`, `CI=true`) on a copy of the working tree; the `spark` and `terraform` commands are the local
+  `test-spark` / `tf-fmt-check` / `tf-validate` checks.
+- First run on GitHub: pending
+- **Not in CI:** `deploy.yml` (publishing `web/` to S3 needs the AWS account), `terraform plan` (needs the AWS
+  account and the GitHub OIDC role), `dbt compile` (arrives with M5), the integration and network tests, the Kafka
+  stack and `verify-lake`.
+
 ---
 
 ## Known gaps and facts to remember
 - Git: commits are made at the end of each loop, not by tooling during it (latest at the start of this loop:
-  `2b443eb`, the paused state, Replay a day and 44 px touch targets).
+  `1474d1e`, the F3 alerts rail).
+- **Node 20** reached end of life in April 2026. CI uses Node 20 to match this machine (v20.20.2); moving local and
+  CI to Node 22/24 together is a follow-up.
 - An unused Docker volume `dockwatch_iceberg-catalog` (old SQLite catalog) still exists; backup copy at
   `data/iceberg_catalog_backup.db`. The Postgres catalog is verified, so the volume can be deleted (left to the user).
 - **Alerts reach the page within about 2 min** of the exporter seeing them (the exporter writes `alerts.json` every
