@@ -230,3 +230,27 @@ type, or a Connect type it doesn't know, stops the apply with an error instead o
 `cdc-verify` computes one checksum per table on both sides with the same function (`cdc/checksum.py`): canonical
 text per value, sha256 per row, sha256 of the sorted row hashes, over Postgres's columns. Equal row counts and equal
 checksums for all five tables mean Iceberg holds exactly what Postgres holds.
+
+### Capping the slot's WAL, `wal_status`, and how long the change topics keep events
+The slot paragraph above says no slot exists before Connect does; that is only true before the first `connect-up`.
+After it, slot `dockwatch_ops` stays (inactive) between CDC runs until `cdc-reset` drops it, and it keeps holding WAL
+the whole time. So ops-db runs with **`max_slot_wal_keep_size=1024MB`**: a slot may hold back at most 1 GB of WAL.
+`pg_replication_slots.wal_status` says where a slot stands:
+- **`reserved`**: what it needs is within `max_wal_size`; the normal state.
+- **`extended`**: it holds more than that, but still within the cap.
+- **`unreserved`**: past the cap; the WAL it needs will be removed at the next checkpoint unless the consumer catches
+  up first.
+- **`lost`**: that WAL is gone. The slot can never resume, because the changes in between no longer exist anywhere.
+
+`safe_wal_size` is how much more WAL can be written before the slot becomes unreserved (NULL without a cap). The cap
+protects the disk, and the catalog database's WAL along with it; the cost is that a long gap with Connect stopped can
+lose the slot. `connect-up` checks `wal_status` first: on `lost` it refuses and points to `python tasks.py cdc-reset`
+(rebuild from a fresh snapshot); on `unreserved` it warns and starts Connect, which may still save the slot.
+
+The Kafka side has the same question: how long `ops.public.*` keeps events. A rebuild of Iceberg from Kafka
+(`cdc-catchup --replay`) needs *every* change since the snapshot, so time-based retention (7 days by default) would
+quietly drop old rows. **Log compaction** keeps the newest event per key, which is enough to rebuild state, but it
+leaves gaps in the offsets, which Spark's Kafka source treats as data loss by default, and it loses the history of
+each row. DockWatch sets **`retention.ms=-1`** (keep forever, `cleanup.policy=delete`) on the five change topics only,
+and accepts that they grow; `cdc-reset` clears them, and compaction plus snapshot-based rebuilds is the plan once they
+get large.

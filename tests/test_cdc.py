@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -6,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from dockwatch.cdc import __main__ as cdc_cli
 from dockwatch.cdc import events as ev
+from dockwatch.cdc import runner
 from dockwatch.cdc.checksum import canonical, data_columns, project, row_hash, table_checksum
-from dockwatch.cdc.guard import cdc_topics, refusal
+from dockwatch.cdc.guard import cdc_topics, refusal, slot_refusal, slot_warning
 
 # Records captured from the real Debezium connector (ops.public.*, JsonConverter with schemas), trimmed to a few keys.
 FIXTURES = Path(__file__).parent / "fixtures" / "cdc"
@@ -195,3 +198,117 @@ def test_reset_only_deletes_cdc_topics():
         "ops.public.rebalancing_jobs",
         "ops.public.stations",
     ]
+
+
+OPS_TOPICS = [f"ops.public.{t}" for t in runner.TABLES]
+OTHER_TOPICS = [
+    "gbfs.station_status",
+    "gbfs.alerts",
+    "dockwatch-connect-offsets",
+    "dockwatch-connect-configs",
+    "dockwatch-connect-status",
+    "__debezium-heartbeat.ops",
+]
+
+
+def test_lost_slot_refuses_connect_up_and_points_to_cdc_reset():
+    msg = slot_refusal("dockwatch_ops", "lost")
+    assert msg is not None
+    assert "lost" in msg
+    assert "python tasks.py cdc-reset" in msg
+    assert "max_slot_wal_keep_size" in msg
+    assert "dockwatch_ops" in msg
+    for dropped in ("lake.ops.*", "slot", "ops tables", "ops.public.*"):
+        assert dropped in msg
+
+
+def test_missing_or_healthy_slot_allows_connect_up():
+    for status in (None, "reserved", "extended"):
+        assert slot_refusal("dockwatch_ops", status) is None
+        assert slot_warning("dockwatch_ops", status) is None
+
+
+def test_unreserved_slot_warns_but_allows_connect_up():
+    assert slot_refusal("dockwatch_ops", "unreserved") is None
+    warning = slot_warning("dockwatch_ops", "unreserved")
+    assert warning is not None
+    assert "unreserved" in warning
+    assert "cdc-reset" in warning
+    assert slot_warning("dockwatch_ops", "lost") is None  # lost is a refusal, not a warning
+
+
+def _no_connect(monkeypatch) -> list:
+    """Fakes for every side effect of connect_up; returns the list of calls that would start or alter something."""
+    calls: list = []
+    monkeypatch.setattr(runner, "guard", lambda task: None)
+    monkeypatch.setattr(runner, "slot_status", lambda slot, dsn=None: "lost")
+    monkeypatch.setattr(runner, "sh", lambda *cmd, **kw: calls.append(("sh", cmd)))
+    monkeypatch.setattr(runner, "admin", lambda: calls.append(("admin",)))
+    monkeypatch.setattr(runner, "ensure_cdc_topic_retention", lambda client: calls.append(("retention",)))
+    monkeypatch.setattr(runner, "http", lambda *a, **kw: calls.append(("http", a)))
+    return calls
+
+
+def test_connect_up_checks_the_slot_before_starting_connect(monkeypatch):
+    calls = _no_connect(monkeypatch)
+    with pytest.raises(runner.CdcError, match="cdc-reset"):
+        runner.connect_up()
+    assert calls == []  # no compose up, no topic alter, no connector registration
+
+
+def test_cli_connect_up_exits_1_on_a_lost_slot(monkeypatch, capsys):
+    calls = _no_connect(monkeypatch)
+    with pytest.raises(SystemExit) as exit_info:
+        cdc_cli.main(["connect-up"])
+    assert exit_info.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("cdc connect-up: ")
+    assert "cdc-reset" in err
+    assert calls == []
+
+
+class FakeFuture:
+    def result(self):
+        return None
+
+
+class FakeAdmin:
+    def __init__(self, topics):
+        self.topics = topics
+        self.altered: dict[str, dict] = {}
+
+    def list_topics(self, timeout=None):
+        return type("Metadata", (), {"topics": {t: object() for t in self.topics}})()
+
+    def incremental_alter_configs(self, resources):
+        for r in resources:
+            self.altered[r.name] = {e.name: e.value for e in r.incremental_configs}
+        return {r: FakeFuture() for r in resources}
+
+
+def test_cdc_topic_retention_is_set_only_on_ops_topics():
+    client = FakeAdmin(OTHER_TOPICS + OPS_TOPICS)
+    assert runner.ensure_cdc_topic_retention(client) == sorted(OPS_TOPICS)
+    assert sorted(client.altered) == sorted(OPS_TOPICS)
+    for configs in client.altered.values():
+        assert configs == {"retention.ms": "-1", "cleanup.policy": "delete"}
+    assert runner.ensure_cdc_topic_retention(FakeAdmin(OTHER_TOPICS)) == []
+
+
+def test_connector_creates_ops_topics_with_unlimited_retention():
+    cfg = json.loads(runner.CONNECTOR_FILE.read_text(encoding="utf-8"))["config"]
+    assert not any(k.startswith("topic.creation.default.") and ("retention" in k or "cleanup" in k) for k in cfg)
+    covering = []
+    for group in (g.strip() for g in cfg["topic.creation.groups"].split(",")):
+        patterns = cfg[f"topic.creation.{group}.include"].split(",")
+
+        def match(name, patterns=patterns):
+            return any(re.fullmatch(p.strip(), name) for p in patterns)
+
+        if all(match(t) for t in OPS_TOPICS):
+            covering.append(group)
+            for other in OTHER_TOPICS + ["opsXpublic.vans"]:
+                assert not match(other), other
+            assert cfg[f"topic.creation.{group}.retention.ms"] == "-1"
+            assert cfg.get(f"topic.creation.{group}.cleanup.policy", "delete") == "delete"
+    assert len(covering) == 1

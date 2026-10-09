@@ -30,3 +30,36 @@ def refusal(task: str, running: Callable[[str], bool]) -> str | None:
 def cdc_topics(names: Iterable[str]) -> list[str]:
     """The topics a CDC reset deletes: Debezium's ops.public.* and Connect's own dockwatch-connect-* topics."""
     return sorted(n for n in names if n.startswith(CDC_TOPIC_PREFIXES))
+
+
+RESET_HINT = (
+    "python tasks.py cdc-reset rebuilds CDC from scratch: it drops lake.ops.* and its checkpoints, the slot, the five "
+    "ops tables (re-created empty from the base schema) and the ops.public.* / dockwatch-connect-* topics; the next "
+    "connect-up re-snapshots."
+)
+
+
+def slot_refusal(slot: str, wal_status: str | None) -> str | None:
+    """None if Kafka Connect may start on replication slot `slot` (absent, reserved or extended), else why not.
+
+    `wal_status` comes from pg_replication_slots (None = no such slot; the connector creates it). A `lost` slot was
+    invalidated by max_slot_wal_keep_size: the WAL it needed is gone, so CDC cannot resume from it.
+    """
+    if wal_status != "lost":
+        return None
+    return (
+        f"replication slot {slot} is lost (wal_status = 'lost'): more WAL than max_slot_wal_keep_size was written "
+        f"while Connect was stopped, so Postgres removed the WAL the slot needed and changes since the last catch-up "
+        f"cannot be streamed. Refusing to start Kafka Connect. {RESET_HINT}"
+    )
+
+
+def slot_warning(slot: str, wal_status: str | None) -> str | None:
+    """A warning (Connect may still start) when the slot is `unreserved`: it will be lost at the next checkpoint
+    unless Connect consumes it first."""
+    if wal_status != "unreserved":
+        return None
+    return (
+        f"warning: replication slot {slot} is unreserved (past max_slot_wal_keep_size); it may be lost at the next "
+        f"checkpoint. Starting Connect now may still save it; if it is lost, run python tasks.py cdc-reset."
+    )

@@ -22,6 +22,12 @@
     "value.converter.schemas.enable": "true",
     "heartbeat.interval.ms": "10000",
     "topic.creation.default.replication.factor": "1",
-    "topic.creation.default.partitions": "1"
+    "topic.creation.default.partitions": "1",
+    "topic.creation.groups": "cdc",
+    "topic.creation.cdc.include": "ops\\.public\\..*",
+    "topic.creation.cdc.replication.factor": "1",
+    "topic.creation.cdc.partitions": "1",
+    "topic.creation.cdc.retention.ms": "-1",
+    "topic.creation.cdc.cleanup.policy": "delete"
   }
 }

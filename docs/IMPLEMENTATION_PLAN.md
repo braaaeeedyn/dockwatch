@@ -211,6 +211,10 @@ simulation including deletes. *(Checked with a bounded, seeded run instead of an
 `python tasks.py cdc-e2e --seed 42 --events 1500` = 1500 simulated minutes with deletes and the column add, the same
 operations every time; `data/cdc/e2e-report.json`.)*
 
+*Hardening (2026-10-09):* ops-db caps slot WAL with `max_slot_wal_keep_size=1024MB`; `connect-up` refuses on a
+`lost` slot and points to `python tasks.py cdc-reset`; the `ops.public.*` topics keep events forever
+(`retention.ms=-1`) so a replay rebuild never misses old rows. Compaction of those topics is left to M4 maintenance.
+
 ### M4 · Batch, history and orchestration · Airflow (weeks 5–6)
 - [ ] Airflow 2.x in the `batch` profile (LocalExecutor, Postgres metadata DB shared with nothing else).
 - [ ] DAG `trip_history_monthly`: download a month's trip ZIP, validate columns, load to `bronze.trips`;

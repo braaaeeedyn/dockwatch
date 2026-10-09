@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dockwatch.cdc.checksum import table_checksum
-from dockwatch.cdc.guard import cdc_topics, refusal
+from dockwatch.cdc.guard import cdc_topics, refusal, slot_refusal, slot_warning
 from dockwatch.config import get_settings
 
 UTC = timezone.utc  # noqa: UP017 - the cdc package stays Python 3.10-compatible
@@ -208,9 +208,34 @@ def slot_active(slot: str) -> bool:
     return bool(row and row[0])
 
 
+def slot_status(slot: str, dsn: str | None = None) -> str | None:
+    """pg_replication_slots.wal_status of `slot` (reserved / extended / unreserved / lost), None if there is none."""
+    import psycopg
+
+    with psycopg.connect(dsn or get_settings().ops_db_dsn, connect_timeout=10) as conn:
+        row = conn.execute("SELECT wal_status FROM pg_replication_slots WHERE slot_name = %s", (slot,)).fetchone()
+    return row[0] if row else None
+
+
+def check_slot(slot: str) -> None:
+    """Refuse (CdcError) on a lost slot; warn on stderr on an unreserved one."""
+    status = slot_status(slot)
+    reason = slot_refusal(slot, status)
+    if reason:
+        raise CdcError(reason)
+    warning = slot_warning(slot, status)
+    if warning:
+        print(warning, file=sys.stderr, flush=True)
+
+
 def connect_up(timeout_s: float = 180) -> dict:
-    """Start Connect (profile cdc), register infra/connect/ops.json, wait until it streams from an active slot."""
+    """Start Connect (profile cdc), register infra/connect/ops.json, wait until it streams from an active slot.
+
+    Before anything starts: the memory guard, the lost-slot check, and unlimited retention on existing ops.public.*.
+    """
     guard("connect-up")
+    check_slot(connector()["config"]["slot.name"])
+    ensure_cdc_topic_retention(admin())
     sh("docker", "compose", "--profile", "stream", "--profile", "cdc", "up", "-d", "--wait", "connect", timeout=300)
     url, doc = get_settings().connect_url.rstrip("/"), connector()
     name, cfg = doc["name"], doc["config"]
@@ -274,6 +299,36 @@ def admin():
     from confluent_kafka.admin import AdminClient
 
     return AdminClient({"bootstrap.servers": get_settings().kafka_bootstrap})
+
+
+CDC_TOPIC_RETENTION = {"retention.ms": "-1", "cleanup.policy": "delete"}
+
+
+def ensure_cdc_topic_retention(client) -> list[str]:
+    """Set retention.ms=-1 / cleanup.policy=delete on every existing ops.public.* topic (and nothing else).
+
+    Idempotent. New topics get the same settings from the connector's topic.creation group (infra/connect/ops.json);
+    this upgrades topics created before it (7-day default). Returns the topics altered.
+    """
+    from confluent_kafka.admin import AlterConfigOpType, ConfigEntry, ConfigResource, ResourceType
+
+    topics = sorted(t for t in client.list_topics(timeout=10).topics if t.startswith("ops.public."))
+    if not topics:
+        return []
+    resources = [
+        ConfigResource(
+            ResourceType.TOPIC,
+            t,
+            incremental_configs=[
+                ConfigEntry(k, v, incremental_operation=AlterConfigOpType.SET) for k, v in CDC_TOPIC_RETENTION.items()
+            ],
+        )
+        for t in topics
+    ]
+    for fut in client.incremental_alter_configs(resources).values():
+        fut.result()
+    print(f"retention.ms=-1, cleanup.policy=delete on {', '.join(topics)}", flush=True)
+    return topics
 
 
 def delete_cdc_topics(timeout_s: float = 60) -> list[str]:

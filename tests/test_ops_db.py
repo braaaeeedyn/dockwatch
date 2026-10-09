@@ -4,10 +4,14 @@ Every test runs inside one transaction that is rolled back at the end: rolled-ba
 stream Debezium reads, so these tests emit no CDC events and leave no rows behind.
 """
 
+import os
+
 import psycopg
 import pytest
 from psycopg import errors
 
+from dockwatch.cdc import runner
+from dockwatch.cdc.guard import slot_refusal
 from dockwatch.config import get_settings
 
 pytestmark = pytest.mark.integration
@@ -135,3 +139,20 @@ def test_publication_lists_only_the_five_tables(conn):
     rows = conn.execute("SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = 'dockwatch_ops'")
     assert {(s, t) for s, t in rows} == {("public", t) for t in TABLES}
     assert conn.execute("SELECT current_database()").fetchone()[0] == "ops"
+
+
+def test_slot_status_reads_wal_status_from_postgres():
+    # A temporary physical slot of our own (released with its session); the real slot dockwatch_ops is never touched.
+    name = f"dockwatch_probe_{os.getpid()}"
+    probe = psycopg.connect(get_settings().ops_db_dsn, autocommit=True, connect_timeout=10)
+    try:
+        probe.execute("SELECT pg_create_physical_replication_slot(%s, true, true)", (name,))
+        status = runner.slot_status(name)
+        assert status == "reserved"
+        assert slot_refusal(name, status) is None
+        assert runner.slot_status("no_such_slot") is None
+    finally:
+        probe.execute(
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = %s", (name,)
+        )
+        probe.close()

@@ -835,3 +835,75 @@ Connect, no Spark, no image pull. Kafka Connect, the Debezium connector, the Spa
   and compose rejects the project with only `cdc` active.
 - Deviations kept from the plan: a bounded seeded run instead of "an hour of simulation" (decision 2), and Kafka
   Connect in its own on-demand `cdc` profile instead of `stream` (decision 3, memory).
+
+## 2026-10-09 · M3 hardening · WAL cap, lost-slot check, CDC topic retention
+**Did**
+- **WAL cap on ops-db.** `docker-compose.yml`: ops-db's `command` gains `-c max_slot_wal_keep_size=1024MB` (nothing
+  else in the file changed). Applied with one deliberate recreate, volume kept: `stream-stop` and `connect-stop`
+  (neither was running), `docker compose --profile stream up -d --wait --no-deps ops-db` (recreated and healthy in
+  11.9 s), then `docker compose --profile stream restart iceberg-rest` (1.4 s) to drop its pooled JDBC connections.
+  The REST catalog answered again 14.6 s after the recreate started; that is the catalog's downtime. (A first try ran
+  the same commands before the compose edit was saved: ops-db stayed as it was and only iceberg-rest restarted once
+  more, which is harmless.)
+- **Measured before / after the recreate:** `SHOW max_slot_wal_keep_size` went from `-1` (no cap) to `1GB`. The slot
+  `dockwatch_ops` survived the recreate (persistent slots are on disk), still `wal_status = reserved`, inactive,
+  retaining ~1.27 MB; its `safe_wal_size` went from NULL (no limit) to 1,077,300,752 bytes (~1 GiB minus what it
+  retains). `pg_wal` is 272 MiB. `curl localhost:8181/v1/namespaces/ops/tables` lists all 5 ops tables, and all 9
+  tables in `iceberg_catalog` (bronze.station_status, silver.station_status, silver.station_episodes,
+  silver.availability_5m and the five ops.*) are still registered and load through the REST catalog.
+- **What the cap means.** It bounds only what a *slot* may hold back; the `iceberg_catalog` database uses no slot and
+  behaves as before. But WAL is cluster-wide, so an idle `dockwatch_ops` used to pin the catalog's commit WAL too
+  (status-stream / catchup); now that is bounded at ~1 GB plus `pg_wal`'s normal size. The price: if more than 1 GB
+  of WAL is written while Connect is stopped, Postgres invalidates the slot (`wal_status = 'lost'`) and CDC has to
+  be rebuilt with `cdc-reset` and a fresh snapshot. The ops data is simulated, so that is acceptable; the next
+  point makes it loud.
+- **Lost-slot detection before Connect starts.** `guard.slot_refusal(slot, wal_status)` (pure): None for no slot (the
+  connector creates it), `reserved` or `extended`; for `lost` a refusal that names `max_slot_wal_keep_size`, says
+  what `python tasks.py cdc-reset` drops (lake.ops.* and its checkpoints, the slot, the five ops tables, re-created
+  empty, and the ops.public.* / dockwatch-connect-* topics) and that the next connect-up re-snapshots.
+  `guard.slot_warning()` returns a warning for `unreserved` (the slot may be lost at the next checkpoint): it is
+  printed to stderr naming `cdc-reset` as the fallback, and Connect still starts, since starting it now may save the
+  slot. `runner.slot_status(slot)` reads `wal_status` from `pg_replication_slots` (psycopg, `connect_timeout=10`).
+  `connect_up()` now runs: memory guard, then the slot check (a `lost` slot raises `CdcError`, so nothing starts
+  Connect), then the retention step below, then compose up / register / wait as before. The CLI prints
+  `cdc connect-up: replication slot dockwatch_ops is lost (wal_status = 'lost') ... python tasks.py cdc-reset ...`
+  and exits 1. `cdc-e2e` needs no change (it drops the slot before its connect-up).
+- **Retention for `ops.public.*`: unlimited (`retention.ms=-1`, `cleanup.policy=delete`), those five topics only.**
+  - *7 days (the old default)* would let a from-scratch rebuild (`cdc-catchup --replay`, or a fresh checkpoint after
+    losing Iceberg) silently miss every row whose last change is older than 7 days, and a normal catch-up after more
+    than 7 days with Connect stopped would hit `failOnDataLoss`.
+  - *Compaction* would bound storage, but it leaves offset gaps under a checkpoint that the apply's Kafka source
+    (default `failOnDataLoss=true`) may fail on, and it throws away the per-row change history replay and audits use.
+  - *Unlimited* keeps every change; the topics grow with each change. The e2e produces 3,049 events (a few MB) and
+    `cdc-reset` clears them. Revisit (compaction plus snapshot-based rebuilds, M4 maintenance) if `ops.public.*` passes
+    ~1 GB or ~1M events; `metric-e-slot` prints the high watermarks.
+  - New topics: `infra/connect/ops.json` gains a topic-creation group `cdc` (`topic.creation.cdc.include` =
+    the regex `ops\.public\..*`, full match, written with doubled backslashes in JSON; `retention.ms=-1`,
+    `cleanup.policy=delete`, partitions / replication factor 1 like the defaults). No `topic.creation.default.*` retention keys, so `__debezium-heartbeat.ops` keeps the broker default.
+  - Existing topics: `runner.ensure_cdc_topic_retention(client)` sets the same two keys with
+    `incremental_alter_configs` on every existing `ops.public.*` topic and nothing else; idempotent; called from
+    `connect_up()`. Run by hand once before the e2e, it moved the five 7-day topics (`DEFAULT_CONFIG` 604800000) to
+    `retention.ms=-1` as a dynamic topic config; a second call changed nothing new. The heartbeat (7 days, default)
+    and `gbfs.alerts` (28 days) kept theirs.
+- Tests: 7 host unit tests in `tests/test_cdc.py` (lost slot refused with `cdc-reset` in the message; none /
+  reserved / extended allowed; unreserved warns but allows; `connect_up` raises before compose up and before the
+  topic alter; the CLI exits 1 naming `cdc-reset`; retention set only on the 5 ops topics through a fake admin
+  client; `ops.json`'s group covers exactly `ops.public.*` with `retention.ms=-1`). Host suite: 76 pass, 2 skipped.
+  1 integration test in `tests/test_ops_db.py` creates a temporary physical slot on its own connection, reads
+  `reserved` through `runner.slot_status`, and drops it (`dockwatch_ops` is never touched); 6 integration tests pass.
+
+**Measured (the carried CDC run, under the cap)**
+- Host free memory: 2,268 MiB at the start, 2,894 MiB before the e2e, 2,122 MiB before the replay.
+- `python tasks.py cdc-e2e --seed 42 --events 1500`: ok in 89 s, 3,049 events, all five tables equal (rows and
+  checksums), `priority` non-null on 55 rows on both sides; peak `connect` 513 MiB, `cdc-apply` 1,075 MiB. Connect
+  re-created the five topics through the `cdc` group: `retention.ms=-1`, `cleanup.policy=delete`.
+- After the run the slot is `reserved`, inactive, retaining 1,356,920 bytes, `safe_wal_size` 1,075,143,568 bytes;
+  `pg_wal` 272 MiB. High watermarks: docks 2,017, maintenance_tickets 365, rebalancing_jobs 330, stations 95,
+  vans 242 (3,049 in total).
+- `cdc-catchup --replay`: 3,049 events in 4 batches, 23.5 s; `cdc-verify`: ok, all five tables match.
+
+**Correction (M3 entry, 2026-10-09)**
+- The M3 entry says the cap was not added because "the slot only exists while CDC is in use". That is wrong: the
+  slot is created by the first `connect-up` and persists, inactive, while Connect is stopped, until `cdc-reset` (or
+  `cdc-e2e`'s reset) drops it, so it pins WAL between CDC runs. It is now capped by `max_slot_wal_keep_size`
+  (1024MB), and a slot lost to the cap is reported by `connect-up` with the way out (`cdc-reset`).

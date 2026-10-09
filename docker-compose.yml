@@ -76,7 +76,9 @@ services:
   ops-db:
     profiles: [stream]
     image: postgres:16-alpine
-    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    # max_slot_wal_keep_size caps the WAL an idle slot can pin; past it the slot is lost (python tasks.py cdc-reset)
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4",
+              "-c", "max_slot_wal_keep_size=1024MB"]
     environment:
       POSTGRES_DB: ops
       POSTGRES_USER: ops

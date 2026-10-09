@@ -71,6 +71,9 @@ python tasks.py cdc-verify           # Postgres vs Iceberg row counts and checks
 python tasks.py cdc-reset            # drop lake.ops.*, the replication slot, the ops tables (re-created) and CDC topics
 ```
 
+If `connect-up` stops with "replication slot dockwatch_ops is lost", more than 1 GB of WAL was written while Connect
+was stopped (`max_slot_wal_keep_size`); rebuild CDC with `python tasks.py cdc-reset`.
+
 Redpanda Console: http://localhost:8088 · local S3 endpoint: http://localhost:8333
 
 The site in `web/` is static (no build step). Serve it and run its tests (needs Node 20):
