@@ -8,6 +8,8 @@ import subprocess
 import sys
 
 TF_IMAGE = "hashicorp/terraform:1.9"
+# Kafka Connect + Debezium (M3, compose service `connect`, profile cdc). The same literal is in docker-compose.yml.
+CONNECT_IMAGE = "quay.io/debezium/connect:2.7.3.Final"
 
 
 def sh(*cmd: str) -> None:
@@ -36,10 +38,22 @@ def stream_running() -> bool:
     return bool(out.stdout.strip())
 
 
+def connect_running() -> bool:
+    out = subprocess.run(
+        ["docker", "compose", "--profile", "stream", "--profile", "cdc", "ps", "-q", "--status", "running", "connect"],
+        capture_output=True,
+        text=True,
+    )
+    return bool(out.stdout.strip())
+
+
 def catchup() -> None:
     """Process the Kafka backlog with the same job, image and checkpoints as `stream`, then exit (availableNow)."""
     if stream_running():
         print("status-stream is running; stop it first (python tasks.py stream-stop): one Spark JVM at a time.")
+        sys.exit(1)
+    if connect_running():
+        print("Kafka Connect is running; stop it first (python tasks.py connect-stop): never beside Spark.")
         sys.exit(1)
     sh(
         "docker",
@@ -148,6 +162,18 @@ TASKS = {
     # "Replay a day" file from the raw GBFS archive (host only, no Spark). Not `replay`: that re-publishes to Kafka.
     "replay-export": lambda *a: uv("python", "-m", "dockwatch.exporter.replay", *a),
     "geo": lambda *a: uv("--group", "geo", "python", "-m", "dockwatch.geo", *a),
+    # M3 ops database (host Python + psycopg against compose ops-db; no JVM)
+    "ops-schema": lambda *a: uv("python", "-m", "dockwatch.ops_sim", "schema", *a),
+    "ops-sim": lambda *a: uv("python", "-m", "dockwatch.ops_sim", *a),
+    "ops-explain": lambda *a: uv("python", "-m", "dockwatch.ops_sim", "explain", *a),
+    # M3 CDC: Kafka Connect (profile cdc, on demand) and the Spark MERGE apply (service cdc-apply). Connect and a
+    # Spark JVM never run together: the cdc tasks refuse (dockwatch/cdc/guard.py).
+    "connect-up": lambda *a: uv("python", "-m", "dockwatch.cdc", "connect-up", *a),
+    "connect-stop": lambda *a: sh("docker", "compose", "--profile", "stream", "--profile", "cdc", "stop", "connect"),
+    "cdc-reset": lambda *a: uv("python", "-m", "dockwatch.cdc", "reset", *a),
+    "cdc-catchup": lambda *a: uv("python", "-m", "dockwatch.cdc", "catchup", *a),
+    "cdc-verify": lambda *a: uv("python", "-m", "dockwatch.cdc", "verify", *a),
+    "cdc-e2e": lambda *a: uv("python", "-m", "dockwatch.cdc", "e2e", *a),
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),
     "tf-fmt-check": lambda *a: terraform("fmt", "-check", "-recursive", "-diff"),

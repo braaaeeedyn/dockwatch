@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     trigger_mode: Literal["processing_time", "available_now"] = "processing_time"
     watermark: str = "10 minutes"
 
+    # Ops database and CDC (M3). ops_db_dsn is the host view of compose's ops-db (database `ops`, never
+    # iceberg_catalog); Debezium writes one topic per table, ops.public.<table>, applied into lake.<cdc_namespace>.
+    ops_db_dsn: str = "postgresql://ops:ops-local-only@localhost:5434/ops"
+    connect_url: str = "http://localhost:18083"
+    cdc_namespace: str = "ops"
+    cdc_topic_pattern: str = r"ops\.public\..*"
+
     # Exporter (M2): JSON files the static site reads
     export_dir: str = "web/data"
     export_interval_s: int = 60

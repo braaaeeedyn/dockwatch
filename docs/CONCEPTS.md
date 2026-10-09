@@ -157,3 +157,76 @@ metadata file. Committing = atomically swapping that pointer, which is why reade
 - **`MERGE INTO`:** row-level upsert in one atomic commit, used for episodes (insert new, update open, close finished).
 - **Small files:** every minute each query writes at least one small file per partition (~45 KB for silver). That's
   fine for writing but slow and costly to read; M4 compacts them with `rewrite_data_files` and expires old snapshots.
+
+---
+
+## Change data capture (M3)
+
+**Change data capture (CDC)** turns every committed insert, update and delete in a database into an event, in commit
+order, without the application doing anything extra. DockWatch reads the Postgres `ops` database this way (Debezium
+on Kafka Connect) and applies the events to Iceberg tables `lake.ops.*` (Spark `MERGE INTO`).
+
+### Logical replication, pgoutput and the publication
+Postgres writes every change to its write-ahead log (WAL) first. With `wal_level=logical` the WAL also holds enough to
+rebuild row changes, and **logical replication** decodes it into a stream of row events. **pgoutput** is the decoder
+built into Postgres (no extension to install); Debezium asks for it with `plugin.name=pgoutput`. A **publication**
+says which tables the stream includes: `dockwatch_ops` lists exactly the five ops tables, so other tables (and the
+`iceberg_catalog` database) never leave the server. `ops-schema` owns the publication, and the connector is told not
+to create its own (`publication.autocreate.mode=disabled`).
+
+### The replication slot and WAL retention
+A **replication slot** is the server's bookmark for one consumer: it remembers the last WAL position (LSN) the
+consumer confirmed, and Postgres keeps every WAL file after that point until it is confirmed. That is what makes CDC
+lossless across a Connect restart — and what makes a forgotten slot dangerous: while nobody reads it, WAL piles up on
+disk. In DockWatch the connector creates slot `dockwatch_ops` when it is registered, and `cdc-reset` drops it. No
+slot exists before Connect does, so nothing holds WAL while CDC is unused.
+
+### REPLICA IDENTITY
+By default an UPDATE or DELETE in the WAL carries only the primary key of the old row. `REPLICA IDENTITY FULL` makes
+Postgres log the whole old row, so Debezium's `before` image is complete: a delete event still says which station
+and status the job had, and there are no "unchanged TOAST value" placeholders. It costs more WAL per change, which is
+fine at this volume.
+
+### The snapshot
+A new connector cannot get old changes from the WAL (they are gone), so `snapshot.mode=initial` first reads every
+existing row and emits it as op `r` (read), then switches to the stream at the exact LSN where the snapshot was taken.
+The seeded run registers the connector on empty tables, so it sees 0 `r` events and every row arrives as `c`.
+
+### The Debezium envelope and the LSN
+Each Kafka message (topic `ops.public.<table>`, key = the primary key) holds an envelope:
+`op` (`c` create, `u` update, `d` delete, `r` snapshot read), `before`, `after`, and `source` (database, table,
+transaction id and **`lsn`**, the WAL position of the change). With the JSON converter's `schemas.enable=true` every
+message also carries its schema: column names and Connect types (`int64`, `double`, `io.debezium.time.ZonedTimestamp`
+…). The apply takes the table from the topic, the key columns from the key schema and the column types from the value
+schema; a delete takes its key from `before`.
+
+**Why LSN order is the right order per row:** a writer holds the row lock until it commits, so two transactions that
+change the same row are serialised — the second one's change is written to the WAL after the first committed. So
+for any single row, ordering events by LSN gives commit order. (Across *different* rows LSN order and commit order can
+differ, but the apply never needs that.) Each table is one Kafka partition, so Kafka offset order agrees too; the
+offset only breaks ties.
+
+### MERGE INTO with deletes, and idempotent replay
+Each micro-batch keeps the newest event per key by (`lsn`, offset) and runs one `MERGE INTO` per table:
+```sql
+WHEN MATCHED AND s._lsn > t._lsn AND s._op = 'd' THEN DELETE
+WHEN MATCHED AND s._lsn > t._lsn               THEN UPDATE SET ...
+WHEN NOT MATCHED AND s._op <> 'd'              THEN INSERT ...
+```
+Every Iceberg row stores the `_lsn` of the change that produced it. An event whose LSN is not newer than the row's
+changes nothing, so applying the same events twice — a Spark retry, or `cdc-catchup --replay` from the earliest
+offset with a fresh checkpoint — is **idempotent**: the table converges to the same rows and the same checksum. One
+subtlety: hard deletes leave no row to compare against, so a replay briefly re-inserts a deleted row from its old
+insert and the later delete event removes it again; by the end of the replay the state is identical.
+
+### Schema evolution end to end
+Migration 001 adds `rebalancing_jobs.priority` in Postgres. Debezium notices the new column on the next change and
+the message schema grows a field. Before the MERGE, the apply compares the incoming columns with the Iceberg table
+and runs `ALTER TABLE … ADD COLUMN priority int` (a metadata-only change in Iceberg). It is add-only: a changed
+type, or a Connect type it doesn't know, stops the apply with an error instead of guessing. The migration has no
+`DEFAULT` on purpose: a default would fill old rows without any WAL event, and Iceberg would never learn those values.
+
+### Proving it: counts and checksums
+`cdc-verify` computes one checksum per table on both sides with the same function (`cdc/checksum.py`): canonical
+text per value, sha256 per row, sha256 of the sorted row hashes, over Postgres's columns. Equal row counts and equal
+checksums for all five tables mean Iceberg holds exactly what Postgres holds.

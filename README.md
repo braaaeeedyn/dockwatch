@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC next). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -44,6 +44,31 @@ python tasks.py verify-lake          # consistency checks; exits 1 on duplicates
 python tasks.py stream               # or: keep the job running, one micro-batch per minute ...
 python tasks.py stream-stop          # ... and stop it (always before catchup / inspect / sql / verify-lake)
 python tasks.py inspect              # the same report as verify-lake, without failing
+```
+
+The operations database (M3, Postgres `ops` on `ops-db`) is filled by a seeded simulator on the host (no JVM):
+
+```bash
+python tasks.py ops-schema           # sql/ops/schema.sql + migrations (idempotent)
+python tasks.py ops-sim seeded --seed 42 --events 1500   # 1500 simulated minutes into empty tables
+python tasks.py ops-explain          # EXPLAIN ANALYZE of the two hottest queries -> sql/ops/PLANS.md
+```
+
+Query plans before and after the two hot-query indexes: [`sql/ops/PLANS.md`](sql/ops/PLANS.md).
+
+Change data capture (M3): Debezium on Kafka Connect streams every insert, update and delete in `ops` to Kafka topics
+`ops.public.*`, and a Spark job applies them to Iceberg `lake.ops.*` with `MERGE INTO`. Connect and the Spark apply
+start on demand and never run together (memory):
+
+```bash
+python tasks.py cdc-e2e --seed 42 --events 1500   # the whole bounded run: reset, Connect up, simulate (with a
+                                                  # column add halfway), Connect stop, apply, verify -> data/cdc/e2e-report.json
+python tasks.py connect-up           # or step by step: start Kafka Connect + register infra/connect/ops.json ...
+python tasks.py connect-stop         # ... stop it before any Spark task
+python tasks.py cdc-catchup          # MERGE the new change events into lake.ops.* (availableNow), then exit
+python tasks.py cdc-catchup --replay # re-apply every event from the start: changes nothing (idempotent)
+python tasks.py cdc-verify           # Postgres vs Iceberg row counts and checksums; exits 1 on any mismatch
+python tasks.py cdc-reset            # drop lake.ops.*, the replication slot, the ops tables (re-created) and CDC topics
 ```
 
 Redpanda Console: http://localhost:8088 · local S3 endpoint: http://localhost:8333

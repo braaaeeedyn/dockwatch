@@ -195,19 +195,21 @@ drawn from the exporter's `live.json`; spot-check 10/10 stations match the publi
 | Spark runs on demand: `restart: "no"`, `catchup` (`availableNow`, drains Kafka then exits) or `stream` until `stream-stop`. | The host is memory-tight; a 24/7 job stalled (driver heartbeat timeout) and auto-restarted. Kafka keeps 7 days, so a catch-up run later loses nothing; checkpoints are shared by both modes. |
 
 ### M3 · CDC from the operational database (week 4)
-- [ ] `sql/ops/schema.sql`: `stations`, `docks`, `maintenance_tickets`, `rebalancing_jobs`, `vans`; normalised,
+- [x] `sql/ops/schema.sql`: `stations`, `docks`, `maintenance_tickets`, `rebalancing_jobs`, `vans`; normalised,
       foreign keys, `CHECK` constraints, `updated_at` triggers.
-- [ ] `ops_sim/`: reacts to `gbfs.alerts` (opens a rebalancing job when a station has been empty 20 min, closes it
+- [x] `ops_sim/`: reacts to `gbfs.alerts` (opens a rebalancing job when a station has been empty 20 min, closes it
       when the episode resolves), opens/closes random maintenance tickets, and **deletes** cancelled jobs.
-- [ ] Debezium Postgres connector (`infra/connect/ops.json`) → `ops.public.*` topics; Kafka Connect added to the
-      `stream` profile.
-- [ ] `cdc/apply.py`: Spark job applying inserts/updates/deletes to Iceberg `ops.*` tables with `MERGE INTO`,
-      ordered by the source LSN, idempotent on replay.
-- [ ] `EXPLAIN ANALYZE` the simulator's two hottest queries before and after adding an index → `sql/ops/PLANS.md`.
-- [ ] Add a column in Postgres; show it flowing through Debezium into Iceberg (schema evolution end to end).
+- [x] Debezium Postgres connector (`infra/connect/ops.json`) → `ops.public.*` topics; Kafka Connect in its own
+      on-demand `cdc` profile (not `stream`: 1 GiB cap, heap ≤ 512 MB, never beside a Spark JVM).
+- [x] `cdc/apply.py`: Spark job applying inserts/updates/deletes to Iceberg `ops.*` tables with `MERGE INTO`,
+      ordered by the source LSN, idempotent on replay (`cdc-catchup --replay`).
+- [x] `EXPLAIN ANALYZE` the simulator's two hottest queries before and after adding an index → `sql/ops/PLANS.md`.
+- [x] Add a column in Postgres; show it flowing through Debezium into Iceberg (schema evolution end to end).
 
 **Done when:** row counts and a checksum of each `ops.*` table match between Postgres and Iceberg after an hour of
-simulation including deletes.
+simulation including deletes. *(Checked with a bounded, seeded run instead of an hour of live simulation:
+`python tasks.py cdc-e2e --seed 42 --events 1500` = 1500 simulated minutes with deletes and the column add, the same
+operations every time; `data/cdc/e2e-report.json`.)*
 
 ### M4 · Batch, history and orchestration · Airflow (weeks 5–6)
 - [ ] Airflow 2.x in the `batch` profile (LocalExecutor, Postgres metadata DB shared with nothing else).

@@ -23,6 +23,9 @@ producer = [
     "confluent-kafka>=2.5",
     "boto3>=1.35",
 ]
+cdc = [
+    "psycopg[binary]>=3.2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -32,7 +35,7 @@ build-backend = "hatchling.build"
 packages = ["src/dockwatch"]
 
 [tool.uv]
-default-groups = ["dev", "producer"]
+default-groups = ["dev", "producer", "cdc"]
 
 [tool.ruff]
 line-length = 120

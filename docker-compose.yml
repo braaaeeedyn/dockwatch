@@ -116,6 +116,59 @@ services:
     # 2026-10-08) kept coming back and competing with other JVMs. Spark runs on demand only.
     restart: "no"
 
+  connect:
+    # M3 Kafka Connect + Debezium: Postgres ops.public.* changes -> Kafka topics ops.public.<table>.
+    # Own profile (not `stream`) and on demand only (python tasks.py connect-up / cdc-e2e): it never runs beside a
+    # Spark JVM on this memory-tight host (tasks.py refuses). The image tag is pinned in tasks.py CONNECT_IMAGE too.
+    profiles: [cdc]
+    image: quay.io/debezium/connect:2.7.3.Final
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: dockwatch-connect
+      CONFIG_STORAGE_TOPIC: dockwatch-connect-configs
+      OFFSET_STORAGE_TOPIC: dockwatch-connect-offsets
+      STATUS_STORAGE_TOPIC: dockwatch-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_FLUSH_INTERVAL_MS: "5000"
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      HEAP_OPTS: -Xms256m -Xmx512m
+    ports: ["18083:8083"]
+    mem_limit: 1g
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs localhost:8083/connectors || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    depends_on:
+      redpanda: { condition: service_healthy }
+      ops-db: { condition: service_healthy }
+
+  cdc-apply:
+    # M3 Spark apply: ops.public.* -> MERGE INTO lake.ops.* (availableNow, then exits). Only ever started with
+    # `docker compose run` by python tasks.py cdc-catchup / cdc-reset / cdc-verify; not in the `spark` profile, so
+    # `python tasks.py up spark` never starts two JVMs. Same image as status-stream (no new image).
+    profiles: [cdc-apply]
+    image: dockwatch-spark:3.5.5
+    command: >
+      /opt/spark/bin/spark-submit --master local[1] --driver-memory 1g
+      --conf spark.sql.codegen.wholeStage=false
+      /opt/dockwatch/src/dockwatch/cdc/apply.py
+    environment:
+      TZ: UTC  # collected timestamps are naive UTC (cdc/checksum.py)
+      DOCKWATCH_TARGET: local
+      DOCKWATCH_S3_BUCKET: dockwatch
+      AWS_ACCESS_KEY_ID: ${DOCKWATCH_S3_ACCESS_KEY:-dockwatch}
+      AWS_SECRET_ACCESS_KEY: ${DOCKWATCH_S3_SECRET_KEY:-dockwatch-local-only}
+      AWS_REGION: ${DOCKWATCH_S3_REGION:-us-west-2}
+    volumes:
+      - ./src:/opt/dockwatch/src:ro
+      - checkpoints:/checkpoints
+    mem_limit: 2g
+    restart: "no"
+
 volumes:
   checkpoints:
   redpanda:

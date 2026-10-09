@@ -1,0 +1,27 @@
+{
+  "name": "ops-postgres",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "plugin.name": "pgoutput",
+    "database.hostname": "ops-db",
+    "database.port": "5432",
+    "database.user": "ops",
+    "database.password": "ops-local-only",
+    "database.dbname": "ops",
+    "topic.prefix": "ops",
+    "table.include.list": "public.stations,public.docks,public.vans,public.rebalancing_jobs,public.maintenance_tickets",
+    "slot.name": "dockwatch_ops",
+    "publication.name": "dockwatch_ops",
+    "publication.autocreate.mode": "disabled",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    "heartbeat.interval.ms": "10000",
+    "topic.creation.default.replication.factor": "1",
+    "topic.creation.default.partitions": "1"
+  }
+}

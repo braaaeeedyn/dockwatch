@@ -5,9 +5,9 @@
 > For the full history, including what was tried and removed, see [`DEVLOG.md`](DEVLOG.md).
 > For the plan, see [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Last updated:** 2026-10-08 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
+**Last updated:** 2026-10-09 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
 partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
-44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`) ✅ · DESIGN.md v1.0.1
+44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg) · DESIGN.md v1.0.1
 
 ---
 
@@ -15,9 +15,27 @@ partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-ta
 
 | What | Why | Status |
 |---|---|---|
-| Nothing in progress | CI now runs on GitHub Actions (`.github/workflows/ci.yml`; see *CI* below). | Next: M3 (ops DB + Debezium CDC). |
+| Nothing in progress | M3 is done (see below). | Next: **M4**, batch, history and orchestration with Airflow (not started). |
 
-Done most recently: **CI on GitHub Actions** (`.github/workflows/ci.yml`, five jobs: lint + host tests, Spark
+Done most recently: **M3, CDC from the operational database** (see *Ops database* and *CDC* below).
+- **Ops database** (`sql/ops/schema.sql`, idempotent): `stations`, `docks`, `vans`, `rebalancing_jobs`,
+  `maintenance_tickets` in database `ops`, with foreign keys, `CHECK` constraints, `updated_at` triggers,
+  `REPLICA IDENTITY FULL` and the publication `dockwatch_ops` on exactly those five tables. Migration
+  `sql/ops/migrations/001_rebalancing_jobs_priority.sql` adds `rebalancing_jobs.priority` (no default).
+- **Simulator** (`src/dockwatch/ops_sim/`): a pure model turns `gbfs.alerts`-shaped alerts and a simulated clock into
+  operations (jobs opened after 20 min empty, closed when the alert resolves, cancelled and later deleted;
+  maintenance tickets; station on/off). The seeded run (seed 42, 1500 simulated minutes, 80 stations) is
+  deterministic: 3,049 change events, 22 job deletes.
+- **Query plans** (`sql/ops/PLANS.md`, from `python tasks.py ops-explain`): the two most-called queries go from a
+  Seq Scan (~15 ms and ~10 ms on 200,000 rows) to an index scan on a partial index (~0.02–0.04 ms).
+- **CDC:** Debezium on Kafka Connect (on demand, profile `cdc`) streams the five tables to `ops.public.*`; the Spark
+  job `cdc/apply.py` (service `cdc-apply`) applies them to Iceberg `lake.ops.*` with `MERGE INTO`, LSN-ordered,
+  deletes included, idempotent on replay, adding new Postgres columns automatically. `python tasks.py cdc-e2e --seed
+  42 --events 1500` runs it all in 83 s: Kafka has exactly the simulator's expected changes, and rows and checksums
+  of all five tables match between Postgres and Iceberg, including the column added halfway (`priority`, 55
+  non-null values on both sides). `cdc-catchup --replay` re-applies all 3,049 events and changes nothing.
+
+Before that: **CI on GitHub Actions** (`.github/workflows/ci.yml`, five jobs: lint + host tests, Spark
 transform tests, Terraform fmt + validate, the full Playwright suite with `--retries=0`, and a repeat job for the
 alerts and shell specs; see *CI* below). New task `python tasks.py tf-fmt-check`; README CI badge.
 
@@ -80,7 +98,7 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next loop: M3 (ops DB + Debezium CDC).
+Next: M4 (batch, history and orchestration: Airflow), not started.
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -89,6 +107,8 @@ Next loop: M3 (ops DB + Debezium CDC).
 | Exporter | `uv run python -m dockwatch.exporter` (log: `data/exporter.log`) | Ctrl+C / kill the process |
 | Stream stack | `python tasks.py up stream` | `python tasks.py down` |
 | Spark streaming job | **Not running** (on demand only). Container `status-stream` has `restart: "no"`. | — |
+| Kafka Connect (Debezium) | **Not running** (on demand only: `python tasks.py connect-up` or `cdc-e2e`). Container `connect` has `restart: "no"`. | `python tasks.py connect-stop` |
+| Spark CDC apply (`cdc-apply`) | **Not running**; started by `cdc-catchup` / `cdc-verify` / `cdc-reset` with `docker compose run`, exits when done. | — |
 
 Spark on demand: `python tasks.py catchup` processes everything in Kafka since the last run (`availableNow`) and
 exits (~30 s for a few minutes of backlog; Kafka keeps 7 days). `python tasks.py stream` keeps it running (one
@@ -98,6 +118,8 @@ skips rewriting it while `data_as_of` stands still), so run `catchup` before loo
 
 Memory: the streaming job uses about 1.5–1.9 GB (limit 2 GB); the rest of the stack under 1 GB. The host often has
 only ~1–3 GB free; the 24/7 job stalled there (driver heartbeat timeout), which is why it is now on demand.
+Kafka Connect peaks at ~520 MiB (`mem_limit: 1g`, heap `-Xmx512m`) and the CDC apply at ~1.2 GB (`mem_limit: 2g`);
+Connect and a Spark JVM never run together (the CDC tasks and `catchup` refuse).
 
 ---
 
@@ -122,6 +144,15 @@ dockwatch.station_state + gbfs.station_information + gbfs.alerts ──(exporter
 
 raw archive (one Pacific day = two UTC dt= partitions) ──(python tasks.py replay-export, by hand, host only)──►
         web/data/replay.json   (Replay a day: one frame per minute, only changed stations after frame 0)
+
+seeded synthetic alerts (or gbfs.alerts in live mode) ──(ops_sim, host, psycopg)──► Postgres ops (ops-db)
+        stations, docks, vans, rebalancing_jobs, maintenance_tickets   (publication dockwatch_ops)
+
+Postgres ops WAL ──(replication slot dockwatch_ops, pgoutput; Debezium on Kafka Connect, on demand)──►
+        Kafka ops.public.<table>   (one topic per table, 1 partition, key = primary key, JSON with schemas)
+ops.public.* ──(Spark cdc/apply.py in cdc-apply, on demand, availableNow; never beside Connect)──►
+        lake.ops.<table>           (MERGE INTO per batch: newest event per key by LSN; deletes; new columns added)
+cdc-verify: Postgres (host) vs Iceberg (Spark) rows + checksums per table → data/cdc/verify.json
 ```
 
 ---
@@ -135,16 +166,16 @@ raw archive (one Pacific day = two UTC dt= partitions) ──(python tasks.py re
 | `IMPLEMENTATION_PLAN.md` | Milestones M0–M7 / F1–F5, decisions (incl. M2 decisions), progress checkboxes. |
 | `DESIGN.md` | DockWatch design system **v1.0.1**, frozen until launch (F5); v1.0.1 = accessibility fix (44 px touch targets in the list table). |
 | `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop, 6 from F3: #46–#51); #35 (touch targets) is resolved. |
-| `CONCEPTS.md` | Kafka, stream processing and Iceberg explained through this codebase. |
+| `CONCEPTS.md` | Kafka, stream processing, Iceberg and change data capture explained through this codebase. |
 | `reference/DESIGN_SOURCE_transitpulse.md` | The TransitPulse design file that was here before; reference only. |
 | `CURRENT_STATE.md` / `DEVLOG.md` | This file / append-only history. |
 
 ### Python package `src/dockwatch/`
-Host code runs on Python 3.12 (uv). Code under `streaming/` also runs in the Spark image (Python 3.10), so it avoids 3.11+ features.
+Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs in the Spark image (Python 3.10), so it avoids 3.11+ features.
 
 | Module | What it does | Why it's built this way |
 |---|---|---|
-| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, state thresholds, exporter. | Switching to AWS is a config change. |
+| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, ops database / CDC (`ops_db_dsn`, `connect_url`, `cdc_namespace`, `cdc_topic_pattern`), state thresholds, exporter. | Switching to AWS is a config change. |
 | `gbfs/models.py`, `gbfs/client.py` | Typed GBFS records (unknown fields kept); discovery → GBFS 2.3; re-discover on 404; custom User-Agent. | Feeds move and grow. |
 | `producer/` | `messages.py` (explode per station, DLQ rejects, order-insensitive content hash), `archive.py` (gzip JSON to S3 or a folder), `kafka.py` (topic specs, idempotent publisher), `poller.py` (ttl-paced poll loop), `__main__.py` (`run`, `once`, `setup`, `replay`). | Keyed by station for per-station ordering; idempotent to avoid retry duplicates. |
 | `streaming/episodes.py` | **Plain Python:** `Thresholds`, `classify()` (station state rule), `EpisodeState` + `advance()` (episode/alert state machine). | Unit-tested without Spark; the Spark rule is tested to give the same answers. |
@@ -156,6 +187,16 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` also runs in the Spa
 | `exporter/build.py`, `exporter/__main__.py` | Builds `live.json` (641 stations with name, code, lat/lon, region, map view, bikes/e-bikes/docks, state, state since, last reported; counts per view) and `alerts.json` (open alerts longest first, last 20 resolved). Atomic writes. `data_as_of` = newest feed snapshot in the export; `generated_at` = time of the last export whose `data_as_of` advanced (`carry_generated_at`, `has_new_data`). Exports without new data are not written; at start the previous `live.json` is read (`read_previous`), so a restart does not make old data look new. `alerts.json` gets the same `generated_at`. | The static site only reads these files, and its freshness pill reads `generated_at`, so it must not move when the data doesn't. Stations without a `region_id` are placed in a view by coordinates. Edge: with no previous `live.json` (first run), the first export is written with `generated_at` = now, so the site shows Live for up to 2 min on old Kafka data, then goes stale. |
 | `exporter/replay.py` | `python tasks.py replay-export [--date YYYY-MM-DD] [--step 60] [--out web/data/replay.json]`: reads one **Pacific** day of `raw/gbfs/station_status` snapshots from the archive (`FsArchive` / `S3Archive`; both UTC `dt=` partitions, filtered by Pacific date), keeps the last snapshot per `step` bucket, computes each station's state with `classify()` / `capacity_of()` and its view with `view_for()`, and writes `replay.json` atomically (format v1: `stations` with name, code, lat/lon, view, capacity; `frames` of `[index, state, bikes, docks]` groups, frame 0 full, later frames only changed stations; busiest stations get the smallest indices). Station names come from the day's last `station_information` snapshot. Default day: the latest complete Pacific day with snapshots (today if there is none). Prints size, stations and frames; exits non-zero if the day has no snapshots. | Uses the same rule as Spark without a JVM, and the archive the producer already writes. Snapshot by snapshot: only each station's previous value is kept. |
 | `geo/build.py`, `geo/__main__.py` | Map-shape build step: Census cartographic boundary counties (`cb_2023_us_county_500k`, downloaded once to `data/geo/`) → per-view projection, rectangle clip (land kept 320 units beyond the square view box for wide/tall map cards), Douglas–Peucker simplify → `web/geo/<view>.json`. `pyshp` is in uv group `geo`, imported lazily. | Run once; output committed. Stations are projected in the browser with the same params, so new stations need no rebuild. |
+| `ops_sim/model.py` | **Pure** simulator rules: `Model.step(tick, now_ts, alerts)` → `Op`s (action, table, Debezium op letter c/u/d, values). An empty episode open ≥ 20 min with no unfinished job at the station opens a job (the first idle van by plate, else it waits); its resolved alert closes the job `done` with `bikes_moved` and frees the van; full alerts open nothing; unfinished jobs are cancelled with a seeded chance per minute and deleted 5–60 min later; tickets open on random docks (dock → `out_of_service`), go `in_progress`, close (dock → `ok`); stations are switched off / on now and then. After migration 001 every job insert / update carries `priority` (1–3). `parse_alert()` reads a `gbfs.alerts` message. | One seeded RNG and sorted iteration: the same seed and alerts always give the same operations, so the CDC run can be compared exactly. |
+| `ops_sim/synthetic.py` | Seeded stations (`sim-0001`…, capacities 11–35), vans (`DW-001`…) and a `gbfs.alerts` stream on a simulated clock (tick = 1 min from 2026-10-01 00:00 UTC; alert after 15 min, resolved at the episode end, the M2 payload); `SeededSimulation` (setup ops, `ops_for(tick)`, migration at tick `events // 2`). | Replaces "an hour of live simulation" with a bounded, repeatable run. |
+| `ops_sim/db.py` | psycopg executor: one transaction per simulated minute; the SQL as module constants; finds "the unfinished job at a station" (`OPEN_JOB_AT_STATION`) and "the unfinished ticket on a dock" (`OPEN_TICKET_ON_DOCK`) before each job / ticket write and raises `Conflict` if the database disagrees with the model; counts calls per constant and the change events Debezium should emit per table and op (from `rowcount`); `apply_schema()` (schema.sql + migrations). | Expected CDC counts come from what Postgres actually changed. |
+| `ops_sim/explain.py`, `ops_sim/__main__.py` | `explain`: scratch database `ops_bench` (created and dropped on ops-db) → seeded run to count calls → reload with the two hot indexes dropped and 200,000 jobs / tickets (`setseed` + `generate_series`) → `EXPLAIN (ANALYZE, BUFFERS)` before / after re-creating each index from schema.sql → `sql/ops/PLANS.md`. CLI: `schema [--base-only]`, `seeded --seed --events [--stations]` (refuses non-empty tables), `live` (consumes `gbfs.alerts`, group `dockwatch-ops-sim`, 60 s tick; stations from `gbfs.station_information`), `explain [--out]`. | The `ops` database and `iceberg_catalog` are never touched by the bench. |
+| `cdc/checksum.py` | Shared table checksum (Python 3.10-safe, for the host and the Spark image): canonical text per value (None `\N`, bool t/f, float `repr`, datetime UTC ISO µs with naive = UTC, Decimal normalised), sha256 per row (fields joined with `\x1f`), sha256 of the sorted row hashes; `_`-prefixed CDC columns dropped. | Postgres and Iceberg rows are compared with one function. |
+| `cdc/guard.py` | `refusal(task, running)`: `cdc-catchup`, `cdc-reset`, `cdc-verify` (and `catchup`) refuse while Kafka Connect or `status-stream` runs, `connect-up` while `cdc-apply` or `status-stream` runs; `cdc_topics()`: a CDC reset may only delete `ops.public.*` and `dockwatch-connect-*`. Pure and unit-tested; `cdc/runner.py` injects a `docker ps` probe. | One heavy JVM at a time on this host. |
+| `cdc/events.py` | **Pure** (Python 3.10): parses one Debezium envelope (JSON with schemas) into an `Event` (table from the topic, op, `source.lsn`, Kafka offset, primary key from the key schema, the row from `after`, or from `before` for a delete); maps Connect types to Iceberg (int16/int32 → int, int64 → bigint, double → double, boolean, string, `io.debezium.time.ZonedTimestamp` / `MicroTimestamp` → timestamp; anything else raises `SchemaError`); `latest_per_key()` by (lsn, offset); `merged_columns()` / `plan_evolution()` (add-only, a type change is refused); the CREATE / ADD COLUMN / MERGE SQL. | Envelope logic is unit-tested on the host with records captured from the real connector. |
+| `cdc/apply.py` | Spark job (service `cdc-apply`): Kafka `subscribePattern` `ops\.public\..*`, earliest, `maxOffsetsPerTrigger` 1000, availableNow; `foreachBatch` (`make_batch_fn`) collects the batch, and per table creates `lake.ops.<table>` (format v2, unpartitioned), adds new columns, keeps the newest event per key and runs `MERGE INTO` (`WHEN MATCHED AND s._lsn > t._lsn AND s._op = 'd'` → DELETE, `WHEN MATCHED AND s._lsn > t._lsn` → UPDATE, `WHEN NOT MATCHED AND s._op <> 'd'` → INSERT). Metadata columns `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`. Checkpoint `/checkpoints/cdc/ops`; `--replay` = fresh checkpoint `/checkpoints/cdc/replay-<ts>` from earliest, deleted afterwards; `--reset` = DROP TABLE `lake.ops.*` PURGE and delete `/checkpoints/cdc`. Prints `CDC_RESULT {json}`. | Stale or repeated events change nothing, so any replay converges to the same table. |
+| `cdc/iceberg_checksums.py` | Spark: rows, columns and checksum of each `lake.ops.*` table over Postgres's column list (passed by the host), plus non-null counts of `rebalancing_jobs.priority`; prints `CDC_ICEBERG {json}`. | The Iceberg side of `cdc-verify`. |
+| `cdc/runner.py`, `cdc/__main__.py` | Host CLI `python -m dockwatch.cdc`: `connect-up` (compose up `connect`, PUT `infra/connect/ops.json`, wait until the connector is RUNNING and the slot active), `connect-stop`, `reset`, `catchup [--replay]` (→ `data/cdc/catchup.json`), `verify` (→ `data/cdc/verify.json`, exit 1 on any mismatch), `e2e`, `kafka-counts`. Spark work runs with `docker compose --profile cdc-apply run --rm --no-deps cdc-apply …`; the output is echoed and the marker lines parsed. `e2e` records each step's time, the compose services running, and peak MiB per container (`docker stats` every ~3 s) in `data/cdc/e2e-report.json`. | One entry point for the tasks; the report is the evidence. |
 | `alerts/handler.py` | `format_alert()` (plain English, Pacific time) and `lambda_handler()` (SNS if `DOCKWATCH_ALERTS_TOPIC_ARN` is set, else prints). | Ready for M6; not deployed. |
 
 ### Station state rule (one definition, used by Spark, Python and the site legend)
@@ -170,6 +211,41 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 | `silver.station_status` | `days(snapshot_ts)` | one row per station per snapshot | `state`, `capacity`; write order `station_id, snapshot_ts`; evolved: `num_scooters_available`. |
 | `silver.availability_5m` | `days(window_start)` | station × 5-minute window | samples, min/avg/max bikes, avg docks, share empty/full/offline; final ~10–15 min after the window. |
 | `silver.station_episodes` | `days(start_ts)` | one row per episode | kind, start/end, duration, status open/closed, alerted; upserted with `MERGE INTO`. |
+| `ops.stations`, `ops.docks`, `ops.vans`, `ops.rebalancing_jobs`, `ops.maintenance_tickets` | none | one row per Postgres row | Written only by `cdc/apply.py` (`MERGE INTO`, deletes included); the Postgres columns plus `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`; format v2. `rebalancing_jobs.priority` was added by the apply when it first appeared in the change events. After the seeded run: 80 / 1,774 / 4 / 111 / 123 rows. |
+
+### Ops database (Postgres `ops` on `ops-db`, `sql/ops/schema.sql`)
+| Table | Key | Notes |
+|---|---|---|
+| `stations` | `station_id` text | name, short_name, lat / lon (`double precision`, range CHECKs), `capacity >= 0`, region_id, is_active |
+| `docks` | `dock_id` identity | FK station; `dock_number > 0`; status `ok` / `out_of_service`; UNIQUE (station_id, dock_number) |
+| `vans` | `van_id` identity | unique plate; capacity 1–40; status `idle` / `busy` / `maintenance` |
+| `rebalancing_jobs` | `job_id` identity | FK station, nullable FK van; status `open` / `assigned` / `done` / `cancelled`; unique `alert_episode_id`; opened_at / closed_at (closed iff done or cancelled, never before opened); `bikes_moved >= 0` (required when done); `assigned` needs a van; `priority` smallint 1–3 from migration 001 (NULL on older rows) |
+| `maintenance_tickets` | `ticket_id` identity | FK dock; issue `jammed` / `broken_lock` / `no_power` / `damaged` / `other`; status `open` / `in_progress` / `closed`; closed_at iff closed, never before opened |
+
+All five have `created_at` / `updated_at` (`timestamptz`; the `set_updated_at()` BEFORE UPDATE trigger sets
+`updated_at = now()`), `REPLICA IDENTITY FULL`, and are exactly the tables of publication `dockwatch_ops`. Hot-query
+indexes (partial): `rebalancing_jobs_open_station_idx` (station_id WHERE status IN ('open', 'assigned')) and
+`maintenance_tickets_open_dock_idx` (dock_id WHERE status <> 'closed'); plans in `sql/ops/PLANS.md`. The
+replication slot `dockwatch_ops` is owned by the Debezium connector: it is created when the connector is registered
+(`connect-up`) and dropped by `cdc-reset` / `cdc-e2e`; `ops-schema` owns only the publication. The tables hold the
+seeded run's result (80 stations, 1,774 docks, 4 vans, 111 jobs, 123 tickets; `priority` set on 55 jobs) and the
+slot exists, inactive while Connect is stopped.
+
+### CDC (Debezium → Kafka → Iceberg)
+- **Kafka Connect** (`connect`, profile `cdc`, `quay.io/debezium/connect:2.7.3.Final`): `mem_limit: 1g`,
+  `KAFKA_HEAP_OPTS` / `HEAP_OPTS` `-Xms256m -Xmx512m` (effective `-Xmx512m`), `restart: "no"`, REST API on
+  http://localhost:18083. Started only on demand.
+- **Connector** `infra/connect/ops.json` (`ops-postgres`): pgoutput, database `ops`, the five `public.*` tables,
+  publication and slot `dockwatch_ops` (`publication.autocreate.mode=disabled`), `snapshot.mode=initial`,
+  `tombstones.on.delete=false`, `JsonConverter` with schemas for key and value, heartbeat every 10 s, topics with 1
+  partition and replication factor 1.
+- **Apply** (`cdc-apply`, see `cdc/apply.py` above) → `lake.ops.*`; **verify** compares rows, columns and the
+  shared checksum per table and writes `data/cdc/verify.json`.
+- **`python tasks.py cdc-e2e --seed 42 --events 1500`** (~85 s): preflight (stops a leftover Connect) → reset-spark →
+  reset-pg-kafka (slot, tables re-created with the base schema, CDC topics) → connect-up → sim-a (ticks 0–749) →
+  schema-change (migration 001) → sim-b (ticks 750–1499) → connect-catch-up (Kafka counts per table and op = the
+  simulator's) → connect-stop → apply → verify → `data/cdc/e2e-report.json` (exit 0 only if everything matched).
+  Last run: ok, 3,049 events, all five tables equal; peak `connect` 518 MiB, `cdc-apply` 1,170 MiB.
 
 ### Kafka topics (Redpanda)
 | Topic | Partitions | Policy | Written by |
@@ -180,6 +256,9 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 | `gbfs.station_status.replay` | 6 | 7 days | `producer replay` (unused so far) |
 | `gbfs.alerts` | 1 | 28 days | Spark episodes query (key `alert_id`, at-least-once) |
 | `dockwatch.station_state` | 1 | compacted | Spark episodes query (key `station_id`) |
+| `ops.public.stations`, `ops.public.docks`, `ops.public.vans`, `ops.public.rebalancing_jobs`, `ops.public.maintenance_tickets` | 1 each | default (Debezium topic creation) | Debezium (key = primary key, Debezium envelope as JSON with schemas); deleted by `cdc-reset` |
+| `dockwatch-connect-configs`, `dockwatch-connect-offsets` (25), `dockwatch-connect-status` (5) | 1 / 25 / 5 | compacted | Kafka Connect's own state; deleted by `cdc-reset` |
+| `__debezium-heartbeat.ops` | 1 | default | Debezium heartbeats (every 10 s while Connect runs); not read by anything, kept by `cdc-reset` |
 
 ### Local stack (`docker-compose.yml`)
 | Service | Profile | Port | Purpose |
@@ -188,7 +267,9 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 | `console` | stream | 8088 | Redpanda Console. |
 | `s3` (SeaweedFS 3.80) | stream | 8333 | Local S3; bucket `dockwatch`. |
 | `iceberg-rest` | stream | 8181 | Iceberg REST catalog; its table pointers live in Postgres database `iceberg_catalog` on `ops-db`. |
-| `ops-db` (Postgres 16) | stream | 5434 | Database `ops` (for M3, empty) and database `iceberg_catalog` (catalog). `infra/postgres/init/` creates the catalog DB on a fresh volume. |
+| `ops-db` (Postgres 16) | stream | 5434 | Database `ops` (the M3 ops schema, see *Ops database*; `wal_level=logical`) and database `iceberg_catalog` (catalog). `infra/postgres/init/` creates the catalog DB on a fresh volume. |
+| `connect` | cdc | 18083 | Kafka Connect + Debezium 2.7.3 (`quay.io/debezium/connect:2.7.3.Final`, same tag as `tasks.py` `CONNECT_IMAGE`); 1 GiB `mem_limit`, heap `-Xmx512m`, `restart: "no"`, healthcheck on `/connectors`; on demand only (`connect-up` / `cdc-e2e`). Its compose calls pass `--profile stream --profile cdc` (it depends on redpanda and ops-db). |
+| `cdc-apply` | cdc-apply | — | The CDC Spark apply / verify / reset (`dockwatch-spark:3.5.5`, `local[1]`, driver 1g, `TZ=UTC`, `src/` read-only, checkpoints volume); 2 GiB `mem_limit`, `restart: "no"`; only started with `docker compose run` by the CDC tasks, not part of the `spark` profile. |
 | `status-stream` | spark | 4040 (Spark UI) | The M2 streaming job; image `dockwatch-spark:3.5.5` (`infra/spark/Dockerfile`: Spark 3.5.5, Java 17, Iceberg 1.6.1 + AWS bundle, Kafka connector, pandas, pyarrow, pytest); `src/` mounted read-only; checkpoints in volume `dockwatch_checkpoints`; 2 GB memory limit; `restart: "no"` (on demand only). |
 
 ### Website (`web/`), static, no build step
@@ -219,13 +300,15 @@ Remote state backend commented out until the AWS account exists.
 - `tasks.py` (`Makefile` forwards): `lint`, `fmt`, `test`, `test-integration`, `test-spark`, `up [profile]`, `down`, `ps`,
   `setup`, `produce`, `produce-once`, `replay` (re-publish an archived day to Kafka), `stream`, `stream-logs`,
   `stream-stop`, `catchup`, `inspect`, `verify-lake`, `sql "<query>"`, `export`, `replay-export` (Replay a day file
-  from the archive), `geo`, `tf-fmt`, `tf-fmt-check` (`terraform fmt -check -recursive -diff`, for CI),
-  `tf-validate`.
-- **Host tests:** 53 pass, 1 skipped (`python tasks.py test`): GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
+  from the archive), `geo`, `ops-schema` (schema.sql + migrations on `ops`), `ops-sim` (`seeded --seed --events`,
+  `live`), `ops-explain` (`--out`, default `sql/ops/PLANS.md`), `connect-up`, `connect-stop`, `cdc-reset`,
+  `cdc-catchup [--replay]`, `cdc-verify`, `cdc-e2e [--seed --events --stations]`, `tf-fmt`, `tf-fmt-check`
+  (`terraform fmt -check -recursive -diff`, for CI), `tf-validate`.
+- **Host tests:** 69 pass, 2 skipped (`python tasks.py test`; the two skips are the `tests/spark` modules): ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 9: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
   replay builder (`tests/test_replay.py`, 7 tests: full first frame then deltas, the shared `classify()` rule, a
   Pacific day across two UTC partitions, decoded frames equal the snapshots, a synthetic full day of 641 stations ×
   1440 frames at 80 changes per frame fits the 1.5 MB budget with the real writer (1,411,600 bytes), the CLI on an
-  `FsArchive`, the default day), alerts, run mode, geo (projection, simplify, clip, fixture stations inside their view). **Spark tests:** 4 pass in the Spark image (`python tasks.py test-spark`); skipped on the host.
+  `FsArchive`, the default day), alerts, run mode, geo (projection, simplify, clip, fixture stations inside their view). **Spark tests:** 8 pass in the Spark image (`python tasks.py test-spark`; 4 transform tests and 4 CDC apply tests in `tests/spark/test_cdc_apply.py`: inserts / updates / deletes across batches, stale events ignored, replay changes nothing, the column evolved before the MERGE, on a hadoop Iceberg catalog in a temp dir); skipped on the host.
 - **Web tests (Playwright 1.64.0 + axe, Chromium):** `npm ci` then `npx playwright test` (serves `web/` on port 5179
   with `tests/web/serve.py`, 2 workers; the server has a 128-connection backlog and HTTP/1.1 keep-alive, so the browser
   reuses a few sockets instead of opening one per file). `tests/web/shell.spec.js`: 11 pass (no horizontal scroll 320–2560 px, axe 0 violations at 320 / 768 /
@@ -257,6 +340,7 @@ Remote state backend commented out until the AWS account exists.
   `data/*.json` to `tests/web/fixtures/` (a real 641-station export, and `replay.json` built from the real archive
   with `--step 600`, 51 frames) and fake time with `page.clock`; `data/replay.json` is a 404 unless a test asks for
   the fixture.
+- **Ops DB integration tests** (`tests/test_ops_db.py`, marked `integration`, not in CI): 5 pass after `python tasks.py ops-schema` (foreign keys, CHECK constraints, `updated_at` trigger, REPLICA IDENTITY FULL, the publication's five tables); each test's transaction is rolled back, so they leave no rows and no CDC events.
 - `inspect`, `verify-lake` and `sql` run Spark with whole-stage codegen **off** (a JVM crash otherwise; see DEVLOG).
 - Lint: ruff, line length 120.
 
@@ -319,6 +403,24 @@ are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
   to a visitor. An exporter heartbeat would need a supervised exporter (out of scope).
 - Docker Compose warns that volume `dockwatch_checkpoints` "already exists but was not created by Docker Compose";
   harmless.
+- **CDC is checked with a bounded, seeded run** (`cdc-e2e`, 1500 simulated minutes), not an hour of live
+  simulation. The simulator's `live` mode needs the Spark stream running to get `gbfs.alerts`, and is not part of
+  any check.
+- **CDC is not in CI** (Postgres, Kafka Connect and the e2e run need the local stack); its host unit tests run in the
+  `python` job and the Spark apply tests in the `spark` job.
+- **Kafka Connect memory:** `mem_limit: 1g` with `KAFKA_HEAP_OPTS` = `-Xms256m -Xmx512m` (the image's
+  entrypoint copies `HEAP_OPTS` into `KAFKA_HEAP_OPTS`; with neither set, `connect-distributed.sh` would use
+  `-Xmx2G`, more than the 1 GiB limit); measured peak ~520 MiB. The apply peaks at ~1.2 GB of its
+  2 GiB. Never start Connect while a Spark JVM runs (the tasks refuse) or vice versa.
+- **The replication slot holds WAL while Connect is stopped:** after `cdc-e2e` the slot `dockwatch_ops` stays
+  (inactive) so a later `connect-up` resumes where it stopped; WAL is cluster-wide, so it also keeps the
+  `iceberg_catalog` database's WAL (~1.3 MB right after the run). `cdc-reset` drops it; there is no
+  `max_slot_wal_keep_size` cap on ops-db.
+- **Hard deletes and replay:** a replay that splits a deleted row's insert and delete into different batches
+  re-inserts the row for one batch, then deletes it again; the end state is identical (checked by `cdc-verify`).
+- **Type changes are not applied:** a changed Postgres column type, or a Connect type the apply does not know (e.g.
+  `numeric`, `date`), stops the apply with `SchemaError`. Columns are add-only; a dropped Postgres column would stay
+  in Iceberg (and `cdc-verify` would still compare only Postgres's columns).
 - **Partition evolution** not done (moved to M4 with compaction).
 - **Small files:** each streaming query writes ≥ 1 file per minute (silver ≈ 45 KB/file). Compaction arrives in M4.
 - `live.json` is ~200 KB uncompressed; fine for now, worth trimming or gzip-serving later (F5).

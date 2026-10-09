@@ -707,3 +707,131 @@ Entry format: `## YYYY-MM-DD · milestone · short title`, then any of **Did / D
 - During loop C the host ran out of memory twice: Claude Code's memory-pressure reaper stopped the GBFS producer
   (twice), a Checker run (after 8 of 69 checks; it was re-run in full after memory was freed and all 69 passed) and
   the CI-status poller. None of these were caused by the code under test. The producer is currently **not running**.
+
+## 2026-10-09 · M3 (part 1) · the ops database, the simulator and the query plans
+**Did**
+- **Schema** `sql/ops/schema.sql` (idempotent, run by `python tasks.py ops-schema` with the migrations) in database
+  `ops` on ops-db: `stations`, `docks`, `vans`, `rebalancing_jobs`, `maintenance_tickets`; foreign keys, `CHECK`
+  constraints (ranges, status lists, "closed iff finished", "never closed before opened", "assigned needs a van",
+  "done needs bikes_moved"), `created_at` / `updated_at` with a `set_updated_at()` BEFORE UPDATE trigger on every
+  table, `REPLICA IDENTITY FULL` on all five (a delete or update will carry the whole old row, so Debezium's
+  `before` image is complete and there are no unchanged-TOAST placeholders), and publication `dockwatch_ops` on
+  exactly those five tables. Only `timestamptz`, `double precision`, `integer` / `bigint` / `smallint`, `boolean`
+  and `text`, so the CDC type mapping stays small. The replication slot is not created here: the Debezium connector
+  will create `dockwatch_ops` (a slot created now would hold WAL until Connect exists).
+- **Migration** `sql/ops/migrations/001_rebalancing_jobs_priority.sql`: `ADD COLUMN IF NOT EXISTS priority smallint`
+  with a CHECK and deliberately **no DEFAULT** (a default fills old rows without WAL events, so Postgres and Iceberg
+  would never agree). This is the column that will flow end to end through Debezium.
+- **Simulator** `src/dockwatch/ops_sim/`: `model.py` is pure (alerts + simulated clock -> `Op`s, one seeded RNG,
+  sorted iteration); `synthetic.py` makes 80 seeded stations, 4 vans and a `gbfs.alerts` stream with the exact M2
+  payload (alert after 15 min, resolved at the episode end); `db.py` runs the ops with psycopg, one transaction per
+  simulated minute, holds the SQL as module constants, counts calls per constant, and counts the change events
+  Debezium should see per table and op from each statement's `rowcount` (a mismatch with the model raises
+  `Conflict`); `__main__.py` has `schema`, `seeded`, `live` and `explain`. psycopg 3.3.6 is in a new uv group `cdc`,
+  added to `default-groups` so CI's `uv sync --locked` installs it (`ci.yml` unchanged).
+- **EXPLAIN ANALYZE** (`python tasks.py ops-explain` -> `sql/ops/PLANS.md`, ~12 s): a scratch database `ops_bench`
+  is created and dropped on ops-db (the `ops` database, its publication and `iceberg_catalog` are untouched). The
+  seeded run there counts calls per constant; the two most-called are the lookups `OPEN_TICKET_ON_DOCK` (365) and
+  `OPEN_JOB_AT_STATION` (308), ahead of `SET_DOCK_STATUS` (243). The bench then reloads the schema without their two
+  partial indexes, loads 2,000 stations, 40,000 docks and 200,000 jobs and tickets (`setseed` + `generate_series`),
+  `ANALYZE`, and runs `EXPLAIN (ANALYZE, BUFFERS)` with parallel workers and JIT off: Seq Scan 15.6 ms -> Index
+  Scan on `rebalancing_jobs_open_station_idx` 0.02 ms, and Seq Scan 10.0 ms -> Index Scan on
+  `maintenance_tickets_open_dock_idx` 0.04 ms.
+- **CDC helpers** (pure, Python 3.10-safe for the Spark image): `cdc/checksum.py` (canonical text per value, sha256
+  per row, sha256 of the sorted row hashes; `_` columns dropped) and `cdc/guard.py` (Spark CDC tasks and `catchup`
+  refuse while Kafka Connect or `status-stream` runs, `connect-up` while `cdc-apply` or `status-stream` runs; a reset
+  may delete only `ops.public.*` and `dockwatch-connect-*` topics).
+- Tests: `tests/test_ops_sim.py` (7) and `tests/test_cdc.py` (4 so far) in the host suite, now 64 pass, 1 skipped;
+  `tests/test_ops_db.py` (5, `integration`, each test rolled back so no CDC events) passes against ops-db.
+
+**Measured** (seed 42, 1500 simulated minutes, 80 stations): 1,355 operations; expected change events
+stations c 80 / u 15, docks c 1,774 / u 243, vans c 4 / u 238, rebalancing_jobs c 133 / u 175 / d 22,
+maintenance_tickets c 123 / u 242: 3,324 in total, well under the ~15k budget, with 22 job deletes (>= 10 needed).
+Running it against Postgres took 1.5 s and matched the model with no `Conflict`.
+
+**Decided**
+- Jobs and tickets are addressed the way an operator would ("the unfinished job at this station", "the unfinished
+  ticket on this dock"), and those lookups guard every insert. That makes them the real hot path and gives the two
+  partial indexes a reason to exist; job deletes go through the unique `alert_episode_id`.
+- 4 vans, so some jobs wait for a van: this keeps `OPEN_JOB_AT_STATION` clearly ahead of the van status updates.
+  `ops-explain` fails if the two queries it explains stop being the two most-called.
+- Docks are inserted per station with one `generate_series` statement, so setup does not dominate the call counts;
+  the expected event count uses its `rowcount`.
+
+**Memory:** the host had 80–110 MiB free physical memory (about 330 MiB available) during this work, far below the
+~1.5 GB the plan asks for before Kafka Connect or Spark. Nothing beyond the running stream stack was started: no
+Connect, no Spark, no image pull. Kafka Connect, the Debezium connector, the Spark `MERGE INTO` apply into
+`lake.ops.*`, the `cdc-e2e` run and the idempotent replay are the next part of M3.
+
+## 2026-10-09 · M3 · CDC from the ops database
+**Did**
+- **Kafka Connect + Debezium.** Compose service `connect` (image `quay.io/debezium/connect:2.7.3.Final`, pinned in
+  `tasks.py` `CONNECT_IMAGE` too) in its own profile `cdc`, not `stream`: `mem_limit: 1g`, `KAFKA_HEAP_OPTS` and
+  `HEAP_OPTS` = `-Xms256m -Xmx512m`, `restart: "no"`, healthcheck `curl -fs localhost:8083/connectors`, internal
+  topics `dockwatch-connect-{configs,offsets,status}` (replication factor 1; Redpanda accepted Connect's compacted
+  topics as is, no `rpk` step needed). The effective heap read from the container's `/proc/*/cmdline` is
+  **`-Xmx512m`**. The connector `infra/connect/ops.json` (`ops-postgres`): pgoutput, database `ops`, the five
+  `public.*` tables, publication and slot `dockwatch_ops`, `publication.autocreate.mode=disabled`,
+  `snapshot.mode=initial`, `tombstones.on.delete=false`, JSON converter with schemas for key and value, heartbeat
+  10 s, one partition per table topic.
+- **Fixtures from the real connector.** `tests/fixtures/cdc/*.jsonl`: 23 records captured from `ops.public.*` after
+  a seeded run (a job created, updated and deleted before the column add; jobs created, updated and deleted after
+  it; and a few stations, docks, vans and tickets records), kept verbatim. They showed two things the code had to
+  follow: the JSON converter writes FLOAT64 as `"double"` (not `float64`), and Postgres `smallint` arrives as
+  `int16`.
+- **`cdc/events.py`** (pure, Python 3.10): Connect schema -> Iceberg types (int16/int32 -> int, int64 -> bigint,
+  double -> double, boolean, string, `ZonedTimestamp` / `MicroTimestamp` -> timestamp; anything else fails loudly),
+  primary key from the key schema, delete key and values from `before`, newest event per key by (`source.lsn`, Kafka
+  offset), `plan_evolution()` (add-only, a type change is refused) and the MERGE SQL.
+- **`cdc/apply.py`** (Spark, service `cdc-apply`, profile `cdc-apply`, `dockwatch-spark:3.5.5`, `mem_limit: 2g`,
+  `local[1]`, driver 1g, `TZ=UTC`, `restart: "no"`): Kafka `subscribePattern` `ops\.public\..*`, availableNow,
+  `maxOffsetsPerTrigger` 1000; `foreachBatch` collects the bounded batch, and per table creates `lake.ops.<table>`
+  (format v2, unpartitioned) if missing, adds new columns, dedupes and runs **`MERGE INTO`** with the stale-event
+  guard (`WHEN MATCHED AND s._lsn > t._lsn AND s._op = 'd' THEN DELETE`, `… THEN UPDATE`, `WHEN NOT MATCHED AND
+  s._op <> 'd' THEN INSERT`). Metadata columns `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`.
+  `--replay` uses a fresh checkpoint from earliest and deletes it afterwards; `--reset` drops `lake.ops.*` (PURGE)
+  and `/checkpoints/cdc`. `cdc/iceberg_checksums.py` is the Iceberg side of verify.
+- **Host runner** `cdc/runner.py` + `python -m dockwatch.cdc` and the tasks `connect-up`, `connect-stop`,
+  `cdc-reset`, `cdc-catchup [--replay]`, `cdc-verify` and **`cdc-e2e`**. `catchup`, `cdc-catchup`, `cdc-reset` and
+  `cdc-verify` refuse while `connect` (or `status-stream`) runs; `connect-up` refuses while `cdc-apply` or
+  `status-stream` runs; `cdc-e2e` stops a leftover Connect first and always stops it at the end.
+- Tests: `tests/test_cdc.py` gained the 5 envelope / schema tests on the captured fixtures (host suite now 69 pass,
+  2 skipped); `tests/spark/test_cdc_apply.py` (4: inserts / updates / deletes across two batches, a stale update
+  ignored, replay changes nothing — not even `_applied_ts` — and the column evolved before the MERGE) drives the
+  real `foreachBatch` function on a hadoop Iceberg catalog in `tmp_path`, and stops its session because
+  `spark.sql.extensions` is static (`test-spark`: 8 pass).
+
+**Measured** (`python tasks.py cdc-e2e --seed 42 --events 1500`, 83 s for all 11 steps):
+- Kafka `ops.public.*` = the simulator's expected changes exactly: stations c 80 / u 15, docks c 1,774 / u 243,
+  vans c 4 / u 238, rebalancing_jobs c 133 / u 175 / d 22, maintenance_tickets c 123 / u 242; 0 snapshot (`r`)
+  events. That is **3,049** change events (the part-1 entry above says 3,324 in total; its per-table numbers are
+  right and add up to 3,049).
+- Postgres = Iceberg after the apply, rows and checksum per table: stations 80, docks 1,774, vans 4,
+  rebalancing_jobs 111 (133 created − 22 deleted), maintenance_tickets 123. `priority` exists on both sides with 55
+  non-null values each. The apply read the 3,049 events in 4 batches; batch 1 ran `ALTER TABLE … ADD COLUMN
+  priority int` before its MERGE.
+- Replay: `cdc-catchup --replay` read all 3,049 events again (4 batches, 24 s), and `cdc-verify` found the same rows
+  and checksums: the apply is **idempotent**.
+- Memory (peak per container, `docker stats` every ~3 s): `connect` 457–518 MiB of its 1 GiB `mem_limit`;
+  `cdc-apply` 1,170 MiB in the apply step (2 GiB limit), 480–600 MiB for verify and reset. Connect and Spark never
+  ran in the same step (recorded per step in `data/cdc/e2e-report.json`). Timings: connect-up 14 s, the three
+  simulation steps 2–3 s each, Connect caught up within 2 s, apply 28 s, verify 10 s.
+- Host free memory swung between ~0.4 and 3.3 GB during the work (other projects); every JVM was started only
+  above ~1.4 GB, and Kafka Connect was stopped before each Spark start.
+
+**Decided**
+- **The replication slot is owned by the connector, not by `ops-schema`** (this deviates from plan decision 8).
+  A slot created by `ops-schema` would hold WAL from the moment the schema exists until Connect first runs, which may
+  be never. Debezium creates `dockwatch_ops` (`slot.name`) when the connector is registered, and `cdc-reset` /
+  `cdc-e2e` drop it with Connect stopped. `ops-schema` still owns the publication (`publication.autocreate.mode`
+  disabled). `ops-db`'s optional `max_slot_wal_keep_size` cap was not added (it would recreate ops-db, and the
+  slot only exists while CDC is in use).
+- **Batches are collected to the driver** and decoded by the pure `events.py`; only the MERGE runs as Spark SQL.
+  The batches are bounded (1,000 records) and the tables small, and it keeps the envelope logic unit-testable on
+  the host.
+- `maxOffsetsPerTrigger` 1000 instead of 5000: with 5000 the whole run was one batch, Iceberg created
+  `rebalancing_jobs` with `priority` already there, and the ADD COLUMN path was never exercised end to end.
+- Every compose call for Connect passes `--profile stream --profile cdc`: `connect` depends on `stream` services,
+  and compose rejects the project with only `cdc` active.
+- Deviations kept from the plan: a bounded seeded run instead of "an hour of simulation" (decision 2), and Kafka
+  Connect in its own on-demand `cdc` profile instead of `stream` (decision 3, memory).
