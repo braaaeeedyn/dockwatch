@@ -403,6 +403,7 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   `node:24-bookworm`, `CI=true`) on a copy of the working tree; the `spark` and `terraform` commands are the local
   `test-spark` / `tf-fmt-check` / `tf-validate` checks.
 - First run on GitHub: **passed** — run 37875703602 on commit 9a42ba4 (2026-10-09 02:40–02:44 UTC), all five jobs green: Python lint + tests (12 s), Terraform fmt + validate (18 s), Spark transform tests (56 s), Playwright suite (2 min 28 s), Playwright repeat (alerts + shell) (3 min 22 s). https://github.com/braaaeeedyn/dockwatch/actions/runs/37875703602
+- Latest run on Node 24 with the bumped actions: **passed** — run 38015779233 on commit 4f0dd72, all five jobs green, no deprecation annotations. https://github.com/braaaeeedyn/dockwatch/actions/runs/38015779233
 - **Not in CI:** `deploy.yml` (publishing `web/` to S3 needs the AWS account), `terraform plan` (needs the AWS
   account and the GitHub OIDC role), `dbt compile` (arrives with M5), the integration and network tests, the Kafka
   stack and `verify-lake`.
@@ -410,8 +411,13 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
 ---
 
 ## Known gaps and facts to remember
-- Git: commits are made at the end of each loop, not by tooling during it (latest at the start of this loop:
-  `0921a0c`, the M3 CDC hardening).
+- Git: commits are made at the end of each loop, not by tooling during it (latest: `4f0dd72`, CI off Node 20).
+- **Path casing (Docker on Windows):** the folder is `DockWatch` on disk, but every container was created from Git Bash
+  as `/c/Users/brady/coding/dockwatch`. Running Docker Compose from a shell that sees a different casing (cmd.exe,
+  PowerShell, Python `shell=True`) makes Compose recreate `ops-db` mid-run, which drops iceberg-rest's catalog
+  connections and fails the CDC apply (`UncheckedSQLException ... iceberg_tables`). Always run tasks from Git Bash in
+  the lowercase path. Recovery (keeps the volume): `docker compose --profile stream up -d --wait --no-deps ops-db &&
+  docker compose --profile stream restart iceberg-rest`.
 - **Local / CI Node split:** CI runs Node 24; this machine runs Node **v20.18.0**, which is past end of life
   (2026-04-30) and outside Playwright 1.64's documented support ("latest 22.x, 24.x or 26.x"). It still installs and
   runs the suite (Playwright itself declares `>=20`), so `engines` is `>=20`. **Upgrade step (the user's):** install

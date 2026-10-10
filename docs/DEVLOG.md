@@ -944,3 +944,17 @@ first pull of the image; Playwright 1.2 min), the repeat job 72 passed in 149 s 
 on `node:20-bookworm` in loop E took 111 s and 161 s, so no slowdown. The container's `npm ci` accepted the edited
 lock. The python job passes in `python:3.12-slim-bookworm` (76 passed, 2 skipped). The new action majors themselves
 can only be proved by the GitHub run after the push.
+
+## 2026-10-09 · M6 (part) · Node 24 CI run on GitHub; path-casing hazard recorded
+**Did**
+- Pushed loop F (commit 4f0dd72). CI run 38015779233 passed: all five jobs green on Node 24 with the bumped action
+  majors (setup-python v7, setup-node v7, cache v6, upload-artifact v7, setup-uv v10.3.0), no deprecation annotations.
+- Recorded the Docker path-casing hazard in CURRENT_STATE's known gaps.
+
+**Found**
+- During loop F the Builder ran checks through a cmd.exe-based runner. The folder is `DockWatch` on disk while the
+  containers were created from Git Bash as `dockwatch`; the different casing made Compose recreate `ops-db` mid-run,
+  which dropped iceberg-rest's pooled catalog connections, and the CDC apply failed. The Builder was (rightly) denied
+  recreating ops-db itself; the user then authorized the restore (`ops-db` recreated from the lowercase path with the
+  volume kept, iceberg-rest restarted). The Checker, run from Git Bash, then passed all 99 checks with ops-db untouched.
+- `upload-artifact@v7` is only exercised when a Playwright job fails, so it is still unproven on GitHub.
