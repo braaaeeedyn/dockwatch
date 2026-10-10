@@ -7,7 +7,7 @@
 
 **Last updated:** 2026-10-09 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
 partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
-44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · DESIGN.md v1.0.1
+44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`, on Node 24) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · DESIGN.md v1.0.1
 
 ---
 
@@ -17,7 +17,16 @@ partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-ta
 |---|---|---|
 | Nothing in progress | M3 is done (see below). | Next: **M4**, batch, history and orchestration with Airflow (not started). |
 
-Done most recently: **M3 hardening** (see *CDC* below).
+Done most recently: **CI off Node 20** (see *CI* below).
+- Both Playwright jobs run on **Node 24** (Active LTS, end of life 2028-04-30) instead of Node 20 (end of life
+  2026-04-30). Proved locally in `node:24-bookworm` (v24.21.0): 49 tests, and 72 in the repeat job, all pass.
+- Every action that ran on the deprecated `node20` action runtime is bumped to a major on `node24`:
+  `actions/setup-python@v7`, `actions/setup-node@v7`, `actions/cache@v6`, `actions/upload-artifact@v7`,
+  `astral-sh/setup-uv@v10.3.0`; `actions/checkout@v5` was already on node24 and stays.
+- `package.json` (and the lock's root entry) declares `"engines": {"node": ">=20"}`, the real floor. This machine
+  stays on Node v20.18.0 (see *Known gaps* for the upgrade step).
+
+Before that: **M3 hardening** (see *CDC* below).
 - **WAL cap:** ops-db runs with `max_slot_wal_keep_size=1024MB`, so the CDC slot can pin at most ~1 GB of WAL while
   Connect is stopped (it had no limit before). Its `safe_wal_size` is now ~1 GiB.
 - **Lost-slot check:** `connect-up` reads the slot's `wal_status` first. On `lost` it refuses to start Connect and
@@ -370,14 +379,16 @@ Remote state backend commented out until the AWS account exists.
 ### CI (`.github/workflows/ci.yml`, GitHub Actions)
 Runs on pushes to `main`, on pull requests and by hand (`workflow_dispatch`). Top-level `permissions: contents: read`;
 a newer run on the same ref cancels the older one (`concurrency: ci-<ref>`). Every job runs on `ubuntu-24.04`; actions
-are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
+are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, which has no major tags):
+`actions/checkout@v5`, `actions/setup-python@v7`, `actions/setup-node@v7`, `actions/cache@v6`,
+`actions/upload-artifact@v7`, `astral-sh/setup-uv@v10.3.0`, all on the `node24` action runtime; no matrix, so the check names stay fixed. Five jobs:
 
 | Job | Runs | Timeout |
 |---|---|---|
 | `Python lint + tests` | `astral-sh/setup-uv` (uv 0.12.11, Python 3.12), `uv sync --locked`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q` (the local commands) | 10 min |
 | `Spark transform tests` | `docker build -t dockwatch-spark:3.5.5 infra/spark`, then `python tasks.py test-spark` (same image and command as locally) | 20 min |
 | `Terraform fmt + validate` | `python tasks.py tf-fmt-check`, `python tasks.py tf-validate` (both in `hashicorp/terraform:1.9`, `init -backend=false`, no AWS credentials) | 10 min |
-| `Playwright suite` | Node 20, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --retries=0` (all 49 tests); uploads `test-results/` (traces) on failure | 30 min |
+| `Playwright suite` | Node 24, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --retries=0` (all 49 tests); uploads `test-results/` (traces) on failure | 30 min |
 | `Playwright repeat (alerts + shell)` | the same setup, then `npx playwright test tests/web/alerts.spec.js tests/web/shell.spec.js --repeat-each 3 --retries=0`, as its own red check if one of them flakes | 30 min |
 
 - **Retries 0:** `playwright.config.js` says `retries: CI ? 1 : 0`, so on GitHub (`CI=true`) a flaky test would pass
@@ -389,7 +400,7 @@ are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
   each run (no Docker layer cache).
 - **Verified locally** (nothing is pushed during a loop): actionlint 1.7.7 (with shellcheck) is clean; the run steps
   of the `python`, `web` and `web-repeat` jobs pass verbatim in Linux containers (`python:3.12-slim-bookworm` and
-  `node:20-bookworm`, `CI=true`) on a copy of the working tree; the `spark` and `terraform` commands are the local
+  `node:24-bookworm`, `CI=true`) on a copy of the working tree; the `spark` and `terraform` commands are the local
   `test-spark` / `tf-fmt-check` / `tf-validate` checks.
 - First run on GitHub: **passed** — run 37875703602 on commit 9a42ba4 (2026-10-09 02:40–02:44 UTC), all five jobs green: Python lint + tests (12 s), Terraform fmt + validate (18 s), Spark transform tests (56 s), Playwright suite (2 min 28 s), Playwright repeat (alerts + shell) (3 min 22 s). https://github.com/braaaeeedyn/dockwatch/actions/runs/37875703602
 - **Not in CI:** `deploy.yml` (publishing `web/` to S3 needs the AWS account), `terraform plan` (needs the AWS
@@ -400,9 +411,13 @@ are pinned to major tags; no matrix, so the check names stay fixed. Five jobs:
 
 ## Known gaps and facts to remember
 - Git: commits are made at the end of each loop, not by tooling during it (latest at the start of this loop:
-  `1474d1e`, the F3 alerts rail).
-- **Node 20** reached end of life in April 2026. CI uses Node 20 to match this machine (v20.20.2); moving local and
-  CI to Node 22/24 together is a follow-up.
+  `0921a0c`, the M3 CDC hardening).
+- **Local / CI Node split:** CI runs Node 24; this machine runs Node **v20.18.0**, which is past end of life
+  (2026-04-30) and outside Playwright 1.64's documented support ("latest 22.x, 24.x or 26.x"). It still installs and
+  runs the suite (Playwright itself declares `>=20`), so `engines` is `>=20`. **Upgrade step (the user's):** install
+  Node 24 LTS (the nodejs.org installer, or nvm-windows `nvm install 24` + `nvm use 24`), then `npm ci` and
+  `npx playwright install chromium`, rerun `env-preflight` and the web checks, then raise `engines` to `>=24` and the
+  env-preflight floor to 24.
 - An unused Docker volume `dockwatch_iceberg-catalog` (old SQLite catalog) still exists; backup copy at
   `data/iceberg_catalog_backup.db`. The Postgres catalog is verified, so the volume can be deleted (left to the user).
 - **Alerts reach the page within about 2 min** of the exporter seeing them (the exporter writes `alerts.json` every

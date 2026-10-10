@@ -76,7 +76,7 @@ was stopped (`max_slot_wal_keep_size`); rebuild CDC with `python tasks.py cdc-re
 
 Redpanda Console: http://localhost:8088 · local S3 endpoint: http://localhost:8333
 
-The site in `web/` is static (no build step). Serve it and run its tests (needs Node 20):
+The site in `web/` is static (no build step). Serve it and run its tests (Node 20 or newer locally; CI runs Node 24):
 
 ```bash
 python -m http.server 5179 --bind 127.0.0.1 --directory web   # http://127.0.0.1:5179
@@ -86,7 +86,7 @@ npx playwright test                  # shell + live map: layout, accessibility, 
 
 **CI** (`.github/workflows/ci.yml`, on pushes to `main` and on pull requests) runs ruff, `ruff format --check` and
 pytest, the Spark transform tests in the Spark image, `terraform fmt -check` + `validate`, the full Playwright suite
-and a repeat job for the alerts and shell specs. Playwright runs with `--retries=0`, so a flaky test shows up red.
+on Node 24 and a repeat job for the alerts and shell specs. Playwright runs with `--retries=0`, so a flaky test shows up red.
 
 ## Data and licence
 - **Bay Wheels GBFS feeds** and **trip history**: Bay Wheels data is provided by Lyft Bikes and Scooters, LLC

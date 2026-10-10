@@ -907,3 +907,40 @@ Connect, no Spark, no image pull. Kafka Connect, the Debezium connector, the Spa
   slot is created by the first `connect-up` and persists, inactive, while Connect is stopped, until `cdc-reset` (or
   `cdc-e2e`'s reset) drops it, so it pins WAL between CDC runs. It is now capped by `max_slot_wal_keep_size`
   (1024MB), and a slot lost to the cap is reported by `connect-up` with the way out (`cdc-reset`).
+
+## 2026-10-09 · CI · off Node 20 (Node 24, node24 action runtimes)
+**Did**
+- **Node 24 for both Playwright jobs** (`node-version: 24`, major only, as `20` was). Node 20 reached end of life on
+  2026-04-30. From the Node release schedule: Node 22 is in maintenance until 2027-04-30; Node 24 is Active LTS
+  (maintenance from 2026-10-20) until 2028-04-30; Node 26 becomes LTS only on 2026-10-28. 24 buys a year more than
+  22 for the same one-line change. Playwright 1.64.0's system requirements say "Node.js: latest 22.x, 24.x or 26.x"
+  (Node 20 is no longer listed); its packages still declare `engines.node ">=20"`.
+- **Actions off the deprecated `node20` action runtime**, each to its latest major (read from each tag's
+  `action.yml`, `runs.using: node24`): `actions/setup-python@v7` (was v5, 4 places), `actions/setup-node@v7` (was
+  v4, 2), `actions/cache@v6` (was v4, 2), `actions/upload-artifact@v7` (was v4, 2; v5 is still node20),
+  `astral-sh/setup-uv@v10.3.0` (was v6). `actions/checkout@v5` was already on node24 and stays. Pinning is still by
+  version tag, no SHAs; setup-uv is an exact tag because since v8 it publishes no major or minor tags (immutable
+  releases only), so `v10.3.0` is the pin. None of the breaking changes in between touch the inputs we use
+  (`pip-install`, `server-url`, the old `manifest-file` format are unused; `cache: npm` is set explicitly;
+  `enable-cache: true`; artifact `name` / `path` / `retention-days` unchanged).
+- Nothing else in `ci.yml` changed: job ids and names, timeouts, `--retries=0` on both Playwright lines, the npm and
+  Playwright caching, the failure-only artifact upload, permissions and concurrency are byte-identical.
+- **`engines`:** `package.json` and the lock's root `packages[""]` gain `"engines": {"node": ">=20"}` (hand-edited,
+  no `npm install` on the host). `>=20` is the real floor: what Playwright declares, what this machine runs and what
+  `env-preflight` checks. `>=24` would make npm warn (`EBADENGINE`) on every host `npm ci` and claim a floor the
+  project's checks don't enforce.
+- **Host unchanged:** this machine stays on Node v20.18.0 (npm 11.11.1). CURRENT_STATE records the local / CI split
+  and the upgrade step under *Known gaps*; raising `engines` and the env-preflight floor to 24 is the follow-up after
+  that upgrade.
+- **Re-based checks:** `check_d.py` (`accept-d-scope`, `accept-d-guard`) and `check_e.py` (`accept-e-scope`,
+  `accept-e-guard`) now diff their own loop's committed range (`954d941..b3ee891`, `b3ee891..0921a0c`) instead of the
+  working tree, so loop F's legitimate `.github/` and `package*.json` edits don't trip them; the working tree is
+  covered by the new `accept-f-scope` / `accept-f-guard`.
+
+**Verified locally** (nothing pushed): actionlint 1.7.7 is clean; `accept-ci-structure` and `accept-ci-parity` pass;
+every `uses:` ref reads `runs.using: node24` on GitHub. The jobs' run steps pass verbatim in `node:24-bookworm`
+(`node --version` v24.21.0; `--ipc=host`, 4 GB, `CI=true`): the web job 49 passed in 116 s wall time (including the
+first pull of the image; Playwright 1.2 min), the repeat job 72 passed in 149 s (Playwright 2.0 min). The same jobs
+on `node:20-bookworm` in loop E took 111 s and 161 s, so no slowdown. The container's `npm ci` accepted the edited
+lock. The python job passes in `python:3.12-slim-bookworm` (76 passed, 2 skipped). The new action majors themselves
+can only be proved by the GitHub run after the push.
