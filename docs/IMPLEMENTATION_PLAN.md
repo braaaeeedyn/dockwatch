@@ -163,7 +163,7 @@ in `gbfs.station_status`, the raw archive has 60 snapshot files, and the tests p
 - [x] Iceberg tables partitioned by `days(snapshot_ts)`, write order `station_id, snapshot_ts`.
 - [x] **Schema evolution:** `num_scooters_available` / `num_scooters_unavailable` added in place (`lake.migrate()`);
       old rows read as null, nothing rewritten.
-- [ ] **Partition evolution** — moved to M4 (see decision below).
+- [x] **Partition evolution** — done in M4a on the lab copy `lab.status_partition_evolution` (DAG `partition_evolution_demo`): 821,289 rows of silver; spec 0 (`day`) held 15 files in 1 partition, spec 1 (`hour`) has 25 partitions / 25 files after optimize. Production stays `day()`.
 - [x] `silver.availability_5m`: 5-minute tumbling windows per station (samples, min/avg/max bikes, share empty/full/offline).
 - [x] `silver.station_episodes`: empty/full **episodes** via `applyInPandasWithState` (state machine in plain Python,
       `streaming/episodes.py`), upserted with **`MERGE INTO`** in `foreachBatch`.
@@ -216,19 +216,37 @@ operations every time; `data/cdc/e2e-report.json`.)*
 (`retention.ms=-1`) so a replay rebuild never misses old rows. Compaction of those topics is left to M4 maintenance.
 
 ### M4 · Batch, history and orchestration · Airflow (weeks 5–6)
-- [ ] Airflow 2.x in the `batch` profile (LocalExecutor, Postgres metadata DB shared with nothing else).
+- [x] Airflow 2.x in the `batch` profile (LocalExecutor, Postgres metadata DB shared with nothing else). *(M4a:
+      Airflow 2.11.2, its own `airflow-db`, plus Trino 483 as the batch SQL engine.)*
 - [ ] DAG `trip_history_monthly`: download a month's trip ZIP, validate columns, load to `bronze.trips`;
       `catchup=True` so `airflow dags backfill -s 2019-01-01 -e ...` loads history. Handles the older and newer
       trip-file schemas (the column names changed over the years).
-- [ ] DAG `iceberg_maintenance` (daily): `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`; logs
-      file counts and sizes before/after into `metrics.maintenance_runs`.
+- [x] DAG `iceberg_maintenance` (daily): `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`; logs
+      file counts and sizes before/after into `metrics.maintenance_runs`. *(M4a: through Trino's `optimize`, on the
+      four streaming and five `ops.*` tables.)*
 - [ ] dbt project (`dbt-trino` locally, `dbt-athena` on aws, one project with two targets):
       `mart_station_availability_daily`, `mart_rebalancing_need`, `mart_trips_vs_availability`, plus staging models
       and tests (`unique`, `not_null`, `accepted_values` for state, relationships to stations).
 - [ ] DAG `marts_daily`: dbt build → Great Expectations checkpoint → **only then** export `web/data/insights/*.json`.
-- [ ] Retries with exponential backoff, SLA misses and task failures alert (email/SNS on aws, log locally).
+- [x] Retries with exponential backoff, SLA misses and task failures alert (email/SNS on aws, log locally).
+      *(M4a: one shared `default_args`; alerts to `data/airflow/alerts.jsonl`, SNS when a topic is set.)*
 
 **Done when:** a backfill of 12 months runs green, marts build, and the insights JSON is produced by the DAG.
+
+**M4a / M4b.** M4 is split in two loops because Airflow, Trino, dbt and the trip-history download are each new on a
+memory-tight host. **M4a** (this loop): Airflow + Trino in the `batch` profile, `iceberg_maintenance`,
+`partition_evolution_demo` (M2's partition-evolution item), `cdc_slot_keepalive`, retries and alerts, the
+path-casing guard. **M4b** (next): `trip_history_monthly`, the dbt project on the same Trino, `marts_daily`.
+
+| M4a decision | Why |
+|---|---|
+| Trino 483 is the batch SQL engine (maintenance now, `dbt-trino` in M4b). | Athena engine v3 is Trino, so one dbt project serves both targets; one 1 GB-heap JVM does all batch SQL; Airflow reaches it over HTTP instead of starting Spark containers through the Docker socket. |
+| Airflow 2.11.2, LocalExecutor, metadata in its own `airflow-db`, never `ops-db`. | A busy scheduler on `ops-db` would write WAL that the CDC slot has to retain. |
+| Batch services start on demand only and never beside a Spark JVM or Kafka Connect. | Host memory: Trino (2 GiB limit), Spark (2 GiB) and Connect (1 GiB) do not fit together. |
+| Retention floor 1 day for `expire_snapshots` / `remove_orphan_files` (code and Trino catalog). | Trino's 7-day default does nothing on a days-old lake; Spark is never writing while Trino runs. |
+| `verify-lake` freshness ignores `replace` (compaction) snapshots. | A maintenance commit must not make a stopped stream look fresh. |
+| Partition evolution is shown on a lab copy (`lab.status_partition_evolution`); production stays `day()`. | Hourly partitions multiply streaming small files; the demo measures the cost first. |
+| Kafka topics `ops.public.*` keep `cleanup.policy=delete`, `retention.ms=-1`. | Compaction needs tombstones (off) and would break per-op CDC counts; revisit past ~1 GB or ~1M events. |
 
 ### M5 · Quality, lineage, observability (week 7)
 - [ ] Great Expectations suites: schema; ranges (`num_bikes_available ≥ 0`, `bikes + docks ≤ capacity` with a

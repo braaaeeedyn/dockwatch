@@ -5,9 +5,10 @@
 > For the full history, including what was tried and removed, see [`DEVLOG.md`](DEVLOG.md).
 > For the plan, see [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Last updated:** 2026-10-09 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ except
-partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
-44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`, on Node 24) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · DESIGN.md v1.0.1
+**Last updated:** 2026-10-12 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ (partition
+evolution done in M4a, on a lab copy) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
+44 px touch targets everywhere) · F3 alerts rail ✅ · F5 "Replay a day" ✅ · M6 CI (`ci.yml`, on Node 24) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · **M4a ✅** (Airflow 2.11.2 + Trino 483 in the `batch` profile:
+`iceberg_maintenance`, `partition_evolution_demo`, `cdc_slot_keepalive`, retries / alerts, path-casing guard) · DESIGN.md v1.0.1
 
 ---
 
@@ -15,9 +16,21 @@ partition evolution (moved to M4) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-ta
 
 | What | Why | Status |
 |---|---|---|
-| Nothing in progress | M3 is done (see below). | Next: **M4**, batch, history and orchestration with Airflow (not started). |
+| **M4b**: `trip_history_monthly` (Bay Wheels trip ZIPs, both schemas, `bronze.trips`, backfill), the dbt project (`dbt-trino` locally, `dbt-athena` on AWS) with the three marts and tests, `marts_daily` (dbt build → quality gate → `web/data/insights/*.json`) | The second half of M4; it only adds DAGs, the dbt project and Trino SQL on the M4a batch stack. | Next (not started). |
 
-Done most recently: **CI off Node 20** (see *CI* below).
+Done most recently: **M4a, Airflow + Trino on demand** (see *Batch and orchestration* and *Iceberg maintenance*
+below).
+- **Batch stack:** Airflow 2.11.2 (LocalExecutor, its own `airflow-db`) and Trino 483 (`trinodb/trino:483`, catalog
+  `lake`) in the `batch` profile, started on demand (`batch-up`, `dag-test`, `batch-stop`), never beside Spark or
+  Connect.
+- **Three DAGs**, paused at creation: `iceberg_maintenance` (bronze 71 → 4 files, silver 405 → 4, rows unchanged,
+  into `lake.metrics.maintenance_runs`), `partition_evolution_demo` (day vs hour on
+  `lab.status_partition_evolution`: production stays `day()`) and `cdc_slot_keepalive` (an idle slot from 77.7 MiB
+  retained to 56 bytes in 43 s of Connect).
+- **Retries with exponential backoff and alerts** (`data/airflow/alerts.jsonl`), `verify-lake` ignoring `replace`
+  snapshots, and the path-casing guard in `tasks.py`.
+
+Before that: **CI off Node 20** (see *CI* below).
 - Both Playwright jobs run on **Node 24** (Active LTS, end of life 2028-04-30) instead of Node 20 (end of life
   2026-04-30). Proved locally in `node:24-bookworm` (v24.21.0): 49 tests, and 72 in the repeat job, all pass.
 - Every action that ran on the deprecated `node20` action runtime is bumped to a major on `node24`:
@@ -115,7 +128,7 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next: M4 (batch, history and orchestration: Airflow), not started.
+Next: finish M4a, then M4b (trip history, the dbt project on Trino, `marts_daily`).
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -126,6 +139,8 @@ Next: M4 (batch, history and orchestration: Airflow), not started.
 | Spark streaming job | **Not running** (on demand only). Container `status-stream` has `restart: "no"`. | — |
 | Kafka Connect (Debezium) | **Not running** (on demand only: `python tasks.py connect-up` or `cdc-e2e`). Container `connect` has `restart: "no"`. | `python tasks.py connect-stop` |
 | Spark CDC apply (`cdc-apply`) | **Not running**; started by `cdc-catchup` / `cdc-verify` / `cdc-reset` with `docker compose run`, exits when done. | — |
+| Trino + `airflow-db` | **Not running** (on demand only: `python tasks.py batch-up`; `restart: "no"`). | `python tasks.py batch-stop` |
+| Airflow scheduler | **Not running** (on demand: `python tasks.py scheduler-up`; DAGs are paused at creation). One-shot Airflow CLI runs (`dag-test`, `airflow …`) exit when done. | `python tasks.py scheduler-stop` |
 
 Spark on demand: `python tasks.py catchup` processes everything in Kafka since the last run (`availableNow`) and
 exits (~30 s for a few minutes of backlog; Kafka keeps 7 days). `python tasks.py stream` keeps it running (one
@@ -136,7 +151,9 @@ skips rewriting it while `data_as_of` stands still), so run `catchup` before loo
 Memory: the streaming job uses about 1.5–1.9 GB (limit 2 GB); the rest of the stack under 1 GB. The host often has
 only ~1–3 GB free; the 24/7 job stalled there (driver heartbeat timeout), which is why it is now on demand.
 Kafka Connect peaks at ~520 MiB (`mem_limit: 1g`, heap `-Xmx512m`) and the CDC apply at ~1.2 GB (`mem_limit: 2g`);
-Connect and a Spark JVM never run together (the CDC tasks and `catchup` refuse).
+Connect and a Spark JVM never run together (the CDC tasks and `catchup` refuse). Trino (`mem_limit: 2g`, heap 1 GB;
+measured peaks 1,438–1,845 MiB) never runs beside a Spark JVM or Connect: `batch-up` refuses beside them, and `catchup`,
+`stream`, `inspect`, `verify-lake`, `sql` and the CDC tasks refuse while Trino runs.
 
 ---
 
@@ -170,6 +187,14 @@ Postgres ops WAL ──(replication slot dockwatch_ops, pgoutput; Debezium on Ka
 ops.public.* ──(Spark cdc/apply.py in cdc-apply, on demand, availableNow; never beside Connect)──►
         lake.ops.<table>           (MERGE INTO per batch: newest event per key by LSN; deletes; new columns added)
 cdc-verify: Postgres (host) vs Iceberg (Spark) rows + checksums per table → data/cdc/verify.json
+
+Batch (on demand; Trino and Airflow never beside Spark or Connect):
+Airflow (LocalExecutor, metadata in airflow-db) ──(DAG tasks, HTTP)──► Trino catalog `lake` (same REST catalog + SeaweedFS)
+        iceberg_maintenance      → optimize / expire_snapshots / remove_orphan_files on the 9 lake tables
+                                 → lake.metrics.maintenance_runs   (one row per table per run)
+        partition_evolution_demo → lake.lab.status_partition_evolution → data/maintenance/partition_evolution.json
+        cdc_slot_keepalive       → docker start / stop of the existing `connect` container → data/metrics/slot_health.jsonl
+        any task failure / SLA miss → data/airflow/alerts.jsonl (+ SNS when DOCKWATCH_ALERTS_TOPIC_ARN is set)
 ```
 
 ---
@@ -183,7 +208,7 @@ cdc-verify: Postgres (host) vs Iceberg (Spark) rows + checksums per table → da
 | `IMPLEMENTATION_PLAN.md` | Milestones M0–M7 / F1–F5, decisions (incl. M2 decisions), progress checkboxes. |
 | `DESIGN.md` | DockWatch design system **v1.0.1**, frozen until launch (F5); v1.0.1 = accessibility fix (44 px touch targets in the list table). |
 | `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop, 6 from F3: #46–#51); #35 (touch targets) is resolved. |
-| `CONCEPTS.md` | Kafka, stream processing, Iceberg and change data capture explained through this codebase. |
+| `CONCEPTS.md` | Kafka, stream processing, Iceberg, change data capture, and table maintenance / orchestration explained through this codebase. |
 | `reference/DESIGN_SOURCE_transitpulse.md` | The TransitPulse design file that was here before; reference only. |
 | `CURRENT_STATE.md` / `DEVLOG.md` | This file / append-only history. |
 
@@ -192,7 +217,7 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 
 | Module | What it does | Why it's built this way |
 |---|---|---|
-| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, ops database / CDC (`ops_db_dsn`, `connect_url`, `cdc_namespace`, `cdc_topic_pattern`), state thresholds, exporter. | Switching to AWS is a config change. |
+| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, ops database / CDC (`ops_db_dsn`, `connect_url`, `cdc_namespace`, `cdc_topic_pattern`), batch (`trino_url`, `alerts_topic_arn`), state thresholds, exporter. | Switching to AWS is a config change. |
 | `gbfs/models.py`, `gbfs/client.py` | Typed GBFS records (unknown fields kept); discovery → GBFS 2.3; re-discover on 404; custom User-Agent. | Feeds move and grow. |
 | `producer/` | `messages.py` (explode per station, DLQ rejects, order-insensitive content hash), `archive.py` (gzip JSON to S3 or a folder), `kafka.py` (topic specs, idempotent publisher), `poller.py` (ttl-paced poll loop), `__main__.py` (`run`, `once`, `setup`, `replay`). | Keyed by station for per-station ordering; idempotent to avoid retry duplicates. |
 | `streaming/episodes.py` | **Plain Python:** `Thresholds`, `classify()` (station state rule), `EpisodeState` + `advance()` (episode/alert state machine). | Unit-tested without Spark; the Spark rule is tested to give the same answers. |
@@ -200,7 +225,7 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 | `streaming/lake.py` | Spark/Iceberg session config (`local` = REST catalog + SeaweedFS, `aws` = Glue), table DDL, `migrate()` for schema evolution (`EVOLUTIONS` list). | Tables evolve in place; fresh and old installs share one history. |
 | `streaming/run_mode.py` | `trigger_options()`: `processingTime` every `trigger_seconds`, or `availableNow`. No pyspark import. | Host-testable. |
 | `streaming/status_stream.py` | The streaming job (four queries, see flow above). In `available_now` mode it waits for every query to drain Kafka, then exits (non-zero if a query failed). | One app keeps memory low; separate checkpoints recover independently; both modes share them. |
-| `streaming/inspect_tables.py`, `streaming/sql.py` | Health/consistency report (counts, freshness, duplicates, Kafka-offset gaps, states, episodes, file sizes); `--check` (`verify-lake`) asserts it and exits 1 on failure (duplicates, offset gaps or missing partitions, silver > 5 min behind bronze, no Iceberg commit in 60 min). One-off SQL. | Proof for the restart test, the catalog fix and day-to-day checks. |
+| `streaming/inspect_tables.py`, `streaming/sql.py` | Health/consistency report (counts, freshness, duplicates, Kafka-offset gaps, states, episodes, file sizes); `--check` (`verify-lake`) asserts it and exits 1 on failure (duplicates, offset gaps or missing partitions, silver > 5 min behind bronze, no Iceberg commit in 60 min; `replace` snapshots, i.e. compaction, do not count as commits, so maintenance alone cannot make a stopped stream look fresh). One-off SQL. | Proof for the restart test, the catalog fix and day-to-day checks. |
 | `exporter/build.py`, `exporter/__main__.py` | Builds `live.json` (641 stations with name, code, lat/lon, region, map view, bikes/e-bikes/docks, state, state since, last reported; counts per view) and `alerts.json` (open alerts longest first, last 20 resolved). Atomic writes. `data_as_of` = newest feed snapshot in the export; `generated_at` = time of the last export whose `data_as_of` advanced (`carry_generated_at`, `has_new_data`). Exports without new data are not written; at start the previous `live.json` is read (`read_previous`), so a restart does not make old data look new. `alerts.json` gets the same `generated_at`. | The static site only reads these files, and its freshness pill reads `generated_at`, so it must not move when the data doesn't. Stations without a `region_id` are placed in a view by coordinates. Edge: with no previous `live.json` (first run), the first export is written with `generated_at` = now, so the site shows Live for up to 2 min on old Kafka data, then goes stale. |
 | `exporter/replay.py` | `python tasks.py replay-export [--date YYYY-MM-DD] [--step 60] [--out web/data/replay.json]`: reads one **Pacific** day of `raw/gbfs/station_status` snapshots from the archive (`FsArchive` / `S3Archive`; both UTC `dt=` partitions, filtered by Pacific date), keeps the last snapshot per `step` bucket, computes each station's state with `classify()` / `capacity_of()` and its view with `view_for()`, and writes `replay.json` atomically (format v1: `stations` with name, code, lat/lon, view, capacity; `frames` of `[index, state, bikes, docks]` groups, frame 0 full, later frames only changed stations; busiest stations get the smallest indices). Station names come from the day's last `station_information` snapshot. Default day: the latest complete Pacific day with snapshots (today if there is none). Prints size, stations and frames; exits non-zero if the day has no snapshots. | Uses the same rule as Spark without a JVM, and the archive the producer already writes. Snapshot by snapshot: only each station's previous value is kept. |
 | `geo/build.py`, `geo/__main__.py` | Map-shape build step: Census cartographic boundary counties (`cb_2023_us_county_500k`, downloaded once to `data/geo/`) → per-view projection, rectangle clip (land kept 320 units beyond the square view box for wide/tall map cards), Douglas–Peucker simplify → `web/geo/<view>.json`. `pyshp` is in uv group `geo`, imported lazily. | Run once; output committed. Stations are projected in the browser with the same params, so new stations need no rebuild. |
@@ -213,8 +238,15 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 | `cdc/events.py` | **Pure** (Python 3.10): parses one Debezium envelope (JSON with schemas) into an `Event` (table from the topic, op, `source.lsn`, Kafka offset, primary key from the key schema, the row from `after`, or from `before` for a delete); maps Connect types to Iceberg (int16/int32 → int, int64 → bigint, double → double, boolean, string, `io.debezium.time.ZonedTimestamp` / `MicroTimestamp` → timestamp; anything else raises `SchemaError`); `latest_per_key()` by (lsn, offset); `merged_columns()` / `plan_evolution()` (add-only, a type change is refused); the CREATE / ADD COLUMN / MERGE SQL. | Envelope logic is unit-tested on the host with records captured from the real connector. |
 | `cdc/apply.py` | Spark job (service `cdc-apply`): Kafka `subscribePattern` `ops\.public\..*`, earliest, `maxOffsetsPerTrigger` 1000, availableNow; `foreachBatch` (`make_batch_fn`) collects the batch, and per table creates `lake.ops.<table>` (format v2, unpartitioned), adds new columns, keeps the newest event per key and runs `MERGE INTO` (`WHEN MATCHED AND s._lsn > t._lsn AND s._op = 'd'` → DELETE, `WHEN MATCHED AND s._lsn > t._lsn` → UPDATE, `WHEN NOT MATCHED AND s._op <> 'd'` → INSERT). Metadata columns `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`. Checkpoint `/checkpoints/cdc/ops`; `--replay` = fresh checkpoint `/checkpoints/cdc/replay-<ts>` from earliest, deleted afterwards; `--reset` = DROP TABLE `lake.ops.*` PURGE and delete `/checkpoints/cdc`. Prints `CDC_RESULT {json}`. | Stale or repeated events change nothing, so any replay converges to the same table. |
 | `cdc/iceberg_checksums.py` | Spark: rows, columns and checksum of each `lake.ops.*` table over Postgres's column list (passed by the host), plus non-null counts of `rebalancing_jobs.priority`; prints `CDC_ICEBERG {json}`. | The Iceberg side of `cdc-verify`. |
-| `cdc/runner.py`, `cdc/__main__.py` | Host CLI `python -m dockwatch.cdc`: `connect-up` (lost-slot check via `slot_status()`, retention on existing `ops.public.*` via `ensure_cdc_topic_retention()`, compose up `connect`, PUT `infra/connect/ops.json`, wait until the connector is RUNNING and the slot active), `connect-stop`, `reset`, `catchup [--replay]` (→ `data/cdc/catchup.json`), `verify` (→ `data/cdc/verify.json`, exit 1 on any mismatch), `e2e`, `kafka-counts`. Spark work runs with `docker compose --profile cdc-apply run --rm --no-deps cdc-apply …`; the output is echoed and the marker lines parsed. `e2e` records each step's time, the compose services running, and peak MiB per container (`docker stats` every ~3 s) in `data/cdc/e2e-report.json`. | One entry point for the tasks; the report is the evidence. |
+| `cdc/runner.py`, `cdc/__main__.py` | Host CLI `python -m dockwatch.cdc`: `connect-up` (lost-slot check via `slot_status()`, retention on existing `ops.public.*` via `ensure_cdc_topic_retention()`, compose up `connect`, PUT `infra/connect/ops.json`, wait until the connector is RUNNING and the slot active), `connect-stop`, `reset`, `catchup [--replay]` (→ `data/cdc/catchup.json`), `verify` (→ `data/cdc/verify.json`, exit 1 on any mismatch), `e2e`, `kafka-counts`. Its `guard()` also consults `batch/guard.py` (no Spark or Connect beside Trino). Spark work runs with `docker compose --profile cdc-apply run --rm --no-deps cdc-apply …`; the output is echoed and the marker lines parsed. `e2e` records each step's time, the compose services running, and peak MiB per container (`docker stats` every ~3 s) in `data/cdc/e2e-report.json`. | One entry point for the tasks; the report is the evidence. |
 | `alerts/handler.py` | `format_alert()` (plain English, Pacific time) and `lambda_handler()` (SNS if `DOCKWATCH_ALERTS_TOPIC_ARN` is set, else prints). | Ready for M6; not deployed. |
+| `batch/guard.py` | **Pure, stdlib only** (tasks.py imports it by path): `refusal(task, running)`: `batch-up`, `scheduler-up`, `iceberg_maintenance`, `partition_evolution_demo` refuse while `status-stream`, `cdc-apply` or `connect` runs; `stream`, `catchup`, `inspect`, `verify-lake`, `sql`, `connect-up` and the CDC tasks refuse while `trino` runs (the message names Trino and `python tasks.py batch-stop`); `cdc_slot_keepalive` refuses beside `status-stream`, `cdc-apply` or `trino`. `running_services()`: `docker ps` by compose labels. | One heavy JVM family at a time on this host. |
+| `batch/maintenance.py` | **Pure:** the 9 tables, the retention / size checks (below `1d` refused), the Trino SQL (`ALTER TABLE … EXECUTE optimize / expire_snapshots / remove_orphan_files`), the measurement query (files, bytes, delete files, rows, snapshots, partitions from `$files` / `$snapshots` / `$partitions`), `maintain()` (measure → three steps → measure; a changed row count raises), the row and the one-INSERT SQL for `lake.metrics.maintenance_runs`; `orphan_files_removed` comes from the `deleted_files_count` metric row Trino 483 returns. | Tested with a fake Trino. |
+| `batch/evolution.py` | **Pure:** lab-table DDL, one INSERT per UTC hour, the evolve and optimize SQL, `pick_days()` (two newest UTC days with ≥ 20 hours, else the two biggest), `summarize()` of `$files` rows per spec, the report. | Tested on fixtures. |
+| `batch/slot.py` | `decide()` (pure: `lost` → fail, never reset; retained ≥ `catch_up_above_mb` or no catch-up for `max_hours_between_catchups` → catch up; else skip), `inspect_slot()` (psycopg on `pg_replication_slots`), `catch_up()` (`docker start` the existing compose `connect` container found by labels, wait for the connector RUNNING and the slot to confirm the start LSN with < 16 MiB retained, always `docker stop`), `slot_health.jsonl` lines. | Never creates containers or runs compose. |
+| `batch/alerts.py`, `batch/airflow_defaults.py` | One JSON line per alert in `data/airflow/alerts.jsonl` (`at`, `kind` = `task_failed` / `sla_miss` / `slot_unhealthy`, `dag_id`, `task_id`, `run_id`, `try_number`, `max_tries`, `exception`, `log_url`), an ERROR log line, SNS when a topic is set (publisher injected in tests). `default_args()`: `retries=3`, `retry_delay` 1 min, exponential backoff, `max_retry_delay` 30 min, `execution_timeout`, `on_failure_callback`; `dag_kwargs()`: `catchup=False`, `max_active_runs=1`, `sla_miss_callback`. | Importable without Airflow, so host tests cover them. |
+| `batch/dag_tasks.py`, `batch/runstate.py`, `batch/airflow_logging.py` | Run inside the Airflow image: the DAG callables (Trino client, Docker SDK, `AirflowFailException` for guard failures); the real state of a `dags test` run (`DAG_TEST_STATE` line); Airflow's logging config with alembic's INFO lines off (they were printed to stdout ahead of `-o json`). | DAG files stay thin. |
+| `batch/host.py`, `batch/__main__.py` | Host CLI `python -m dockwatch.batch`: `batch-up`, `batch-stop`, `airflow`, `dag-test`, `test-airflow`, `scheduler-up`, `scheduler-stop`, `trino-sql`. Every compose call runs from the inherited working directory with `--no-deps`. | Like `dockwatch.cdc`. |
 
 ### Station state rule (one definition, used by Spark, Python and the site legend)
 First match wins: `offline` (not installed, not renting, or no report for 30 min) → `empty` (0 bikes) → `full`
@@ -228,6 +260,8 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 | `silver.station_status` | `days(snapshot_ts)` | one row per station per snapshot | `state`, `capacity`; write order `station_id, snapshot_ts`; evolved: `num_scooters_available`. |
 | `silver.availability_5m` | `days(window_start)` | station × 5-minute window | samples, min/avg/max bikes, avg docks, share empty/full/offline; final ~10–15 min after the window. |
 | `silver.station_episodes` | `days(start_ts)` | one row per episode | kind, start/end, duration, status open/closed, alerted; upserted with `MERGE INTO`. |
+| `metrics.maintenance_runs` | none | one row per table per `iceberg_maintenance` run | `run_id`, `table_name`, `started_at` / `finished_at`, `status` (`ok` / `error`), `error`, files / bytes / rows / snapshots / delete files before and after, `orphan_files_removed`, `partitions_after`. Written by Trino in one INSERT per run. |
+| `lab.status_partition_evolution` | `day(snapshot_ts)`, then evolved to `hour(snapshot_ts)` | silver's rows for two days | Lab copy for `partition_evolution_demo` (dropped and re-created by each run); not created yet. |
 | `ops.stations`, `ops.docks`, `ops.vans`, `ops.rebalancing_jobs`, `ops.maintenance_tickets` | none | one row per Postgres row | Written only by `cdc/apply.py` (`MERGE INTO`, deletes included); the Postgres columns plus `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`; format v2. `rebalancing_jobs.priority` was added by the apply when it first appeared in the change events. After the seeded run: 80 / 1,774 / 4 / 111 / 123 rows. |
 
 ### Ops database (Postgres `ops` on `ops-db`, `sql/ops/schema.sql`)
@@ -279,6 +313,97 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
   513 MiB, `cdc-apply` 1,075 MiB. `cdc-catchup --replay` then re-applied the 3,049 events (23.5 s) and `cdc-verify`
   matched.
 
+### Batch and orchestration (M4a: Airflow 2.11.2 + Trino 483, on demand)
+- **Engines:** Airflow 2.11.2 (LocalExecutor, parallelism 2, one task per DAG at a time, metadata in `airflow-db`)
+  drives Trino (`trinodb/trino:483`) over HTTP; Trino's catalog `lake` is the same Iceberg REST catalog and SeaweedFS
+  warehouse Spark uses, so `lake.silver.station_status` is the same table in both. Writes from Trino to SeaweedFS
+  work without any S3 checksum setting, and Spark reads and appends after Trino's commits (`catchup` +
+  `verify-lake` pass after a maintenance run).
+- **Lifecycle:** `python tasks.py batch-up` (refuses beside Spark / Connect; builds the Airflow image if missing;
+  `up -d --wait --no-deps trino airflow-db`; `airflow db migrate`) → `python tasks.py dag-test <dag_id> [key=value …]`
+  → `python tasks.py batch-stop` (stops every batch service; volumes kept). `dag-test` starts `airflow-db` if needed
+  (never Trino); when no `airflow-scheduler` container runs it first marks the DAG's stale `running` / `queued`
+  dag_runs `failed` with their unfinished task instances and prints each run_id (`runstate fail-stale`: a run left
+  by a killed `dags test` has no job, so zombie detection never ends it, and with `max_active_runs=1` it would block
+  the scheduler); then it runs one bounded `airflow dags test` in `airflow-cli`, reads the run's real state from the metadata
+  DB (`dags test` exits 0 on a failed run), samples `docker stats` every ~3 s and writes
+  `data/airflow/dag-test-<dag_id>.json` (`dag_id`, `conf`, `logical_date`, `state`, `started_at`, `finished_at`,
+  `seconds`, `peak_mem_mib` per service, `containers_running`, task states); exit 1 unless `success`.
+  `python tasks.py scheduler-up` / `scheduler-stop` run the scheduler for a smoke test; DAGs are paused at creation
+  (`DAGS_ARE_PAUSED_AT_CREATION` and `is_paused_upon_creation=True` on each DAG; `airflow dags test` never creates or
+  unpauses the DAG rows), so nothing runs until a DAG is unpaused on purpose. Smoke test: scheduler healthy, the
+  three DAGs listed with `is_paused` true, no import errors, scheduler 382 MiB.
+- **DAGs** (`airflow/dags/`, thin; logic in `src/dockwatch/batch/`), all `catchup=False`, `max_active_runs=1`, the
+  shared `default_args` (`retries=3`, 1 min doubling to at most 30 min, a per-task `execution_timeout`,
+  `on_failure_callback`) and `sla_miss_callback`, with an `sla` on each last task:
+  - `iceberg_maintenance` (`@daily`; params `file_size_threshold` 100MB, `expire_older_than` 1d,
+    `orphan_older_than` 1d, below `1d` refused): `guard` → `maintain` (mapped over the 9 tables, one at a time:
+    measure, `optimize`, `expire_snapshots`, `remove_orphan_files`, measure; a changed row count fails the table) →
+    `record` (one INSERT into `lake.metrics.maintenance_runs`, runs even after a failed table, then fails the run if
+    any table failed).
+  - `partition_evolution_demo` (manual; params `days` = two `YYYY-MM-DD`, default picked from silver):
+    `guard` → `prepare` (drop and re-create `lake.lab.status_partition_evolution` by `day(snapshot_ts)`) →
+    `daily_load` (D1, one INSERT per hour) → `evolve` (`hour(snapshot_ts)`) → `hourly_load` (D2) → `optimize` →
+    `report` (`data/maintenance/partition_evolution.json`: table, source, days, generated_at, stages `daily_load` /
+    `hourly_load` / `optimized`, each with files / rows / bytes / partitions per spec id). Last run in
+    *Iceberg maintenance* below.
+  - `cdc_slot_keepalive` (`@hourly`; params `catch_up_above_mb` 256, `max_hours_between_catchups` 24, `timeout_s`
+    600, `alert_below_safe_mb` 512): `inspect_slot` → `keepalive` (lost → `failed` line, `slot_unhealthy` alert,
+    `AirflowFailException`, never a reset; catch up → refuse beside `status-stream` / `cdc-apply` / `trino`, `docker
+    start` the existing `connect` container, wait for the connector `RUNNING`, **touch one captured row** (`UPDATE
+    vans SET updated_at = now() WHERE van_id = (SELECT min(van_id) FROM vans) RETURNING pg_current_wal_lsn()`,
+    autocommit; an empty `vans` fails with a clear message), wait until `confirmed_flush_lsn` ≥ max(LSN at start,
+    touch LSN) and retained < 16 MiB, touching again (at most every 20 s) while a confirmed touch still leaves
+    retained ≥ 16 MiB, `docker stop` in `finally`; skip otherwise). Connector start, touches and confirmation all
+    count against `timeout_s`; on timeout Connect is stopped, a `failed` line names the stuck `confirmed_flush_lsn`
+    and the target, and the task raises `AirflowFailException` (no retries). One line per run in
+    `data/metrics/slot_health.jsonl` (`at`, `dag_run_id`, `action` caught_up / skipped / failed, `reason`, slot
+    status / retained bytes / `safe_wal_size` before and after, `connect_seconds`, and `touch_lsn` when a row was
+    touched); alert when `safe_wal_size` stays under 512 MB. The Iceberg apply stays `python tasks.py cdc-catchup`.
+    Last run (2026-10-12 06:45 UTC, `catch_up_above_mb=16` after a 77.8 MiB WAL probe): retained 81,579,280 B →
+    56 B, `safe_wal_size` 1,006 MB → 1,090 MB, two touches, Connect up 45.4 s, `dag-test` 61 s; peaks `connect`
+    443 MiB, `airflow-cli` 298 MiB.
+- **Alerts:** every task failure (after its last retry) and SLA miss appends one line to `data/airflow/alerts.jsonl`
+  and logs at ERROR; with `DOCKWATCH_ALERTS_TOPIC_ARN` set it is also published to SNS. Guard failures (Spark or
+  Connect beside Trino) fail at once without retries.
+- **Docker socket:** `/var/run/docker.sock` is mounted only into the three Airflow services, to list running
+  containers (the guard) and to `docker start` / `docker stop` the existing `connect` container. The Airflow user
+  (uid 50000, group 0) reaches it through group 0 on Docker Desktop; no `user:` or `group_add` override.
+- **Path-casing guard:** `tasks.py` `main()` compares `os.getcwd()` exactly with the
+  `com.docker.compose.project.working_dir` label of every existing dockwatch container before any task and refuses
+  with the recovery steps when they differ; it allows when Docker is unreachable or there are no containers (CI).
+
+### Iceberg maintenance (latest run, 2026-10-12 06:41 UTC, `dag-test iceberg_maintenance`, 27 s)
+| Table | Files before → after | Bytes before → after | Snapshots before → after | Orphans removed | Rows |
+|---|---|---|---|---|---|
+| `bronze.station_status` | 6 → 5 | 33.8 MB → 33.8 MB | 3 → 4 | 0 | 1,291,789 |
+| `silver.station_status` | 11 → 5 | 4.4 MB → 4.4 MB | 5 → 6 | 0 | 1,291,789 |
+| `silver.availability_5m` | 6 → 5 | 1.47 MB → 1.45 MB | 5 → 6 | 0 | 264,650 |
+| `silver.station_episodes` | 5 → 5 | 92 KB → 92 KB | 2 → 2 | 0 | 2,377 |
+| `ops.*` (5 tables) | 1 → 1 each | unchanged | 8 → 8 each | 0 | 80 / 1,774 / 4 / 111 / 123 |
+
+One file per day partition after `optimize` (5 days of data). **A compacting run ends with one more snapshot when
+nothing is older than a day:** `optimize` commits exactly one new `replace` snapshot, and `expire_snapshots`
+(`retention_threshold => '1d'`, the catalog floor `iceberg.expire-snapshots.min-retention=1d`; Trino has no
+`retain_last`) only removes snapshots older than a day and never the current one, which is that `replace`. This run
+came ~10 min after the previous one, so every compacted table went +1 and the untouched ones stayed equal. When older
+snapshots exist they go: the run before this one (06:30 UTC) took bronze 15 → 2 and `silver.station_status`
+27 → 3 snapshots. Peak memory: Trino 1,463 MiB (2 GiB limit; 1,691 MiB in the previous run), `airflow-cli` 296 MiB,
+`airflow-db` 25 MiB.
+
+**Partition evolution** (`partition_evolution_demo`, 2026-10-10 13:14 UTC, days 2026-10-08 and 2026-10-09 of
+`silver.station_status`, one INSERT per hour), on `lab.status_partition_evolution`:
+
+| Stage | Spec 0 `day(snapshot_ts)` | Spec 1 `hour(snapshot_ts)` | Total files / rows |
+|---|---|---|---|
+| `daily_load` (D1) | 1 partition, 15 files, 551,260 rows | — | 15 / 551,260 |
+| `hourly_load` (D2, after evolving) | 1 partition, 15 files | 10 partitions, 10 files, 270,029 rows | 25 / 821,289 |
+| `optimized` | — (rewritten into the current spec) | 25 partitions, 25 files, 2.6 MB | 25 / 821,289 |
+
+`optimize` rewrites every file into the table's current spec, so after compaction each hour holds one file: the hourly
+spec keeps ~one file per hour with data (up to 24 a day), where the daily spec compacts a day to one file. Production
+tables stay `day()`.
+
 ### Kafka topics (Redpanda)
 | Topic | Partitions | Policy | Written by |
 |---|---|---|---|
@@ -302,6 +427,11 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
 | `ops-db` (Postgres 16) | stream | 5434 | Database `ops` (the M3 ops schema, see *Ops database*) and database `iceberg_catalog` (catalog). `infra/postgres/init/` creates the catalog DB on a fresh volume. `command`: `wal_level=logical`, `max_replication_slots=4`, `max_wal_senders=4`, `max_slot_wal_keep_size=1024MB` (a slot may retain at most 1 GB of WAL). |
 | `connect` | cdc | 18083 | Kafka Connect + Debezium 2.7.3 (`quay.io/debezium/connect:2.7.3.Final`, same tag as `tasks.py` `CONNECT_IMAGE`); 1 GiB `mem_limit`, heap `-Xmx512m`, `restart: "no"`, healthcheck on `/connectors`; on demand only (`connect-up` / `cdc-e2e`). Its compose calls pass `--profile stream --profile cdc` (it depends on redpanda and ops-db). |
 | `cdc-apply` | cdc-apply | — | The CDC Spark apply / verify / reset (`dockwatch-spark:3.5.5`, `local[1]`, driver 1g, `TZ=UTC`, `src/` read-only, checkpoints volume); 2 GiB `mem_limit`, `restart: "no"`; only started with `docker compose run` by the CDC tasks, not part of the `spark` profile. |
+| `trino` | batch | 18080 | `trinodb/trino:483` (same tag as `tasks.py` `TRINO_IMAGE`); config in `infra/trino/etc` (single node, heap `-Xmx1G`, `query.max-memory-per-node` 512 MB + heap headroom 256 MB, `task.max-writer-count=1`); catalog `lake` = Iceberg REST at `iceberg-rest:8181`, native S3 on SeaweedFS (path style), `expire-snapshots` / `remove-orphan-files` min retention `1d`; `mem_limit: 2g`, `restart: "no"`, healthcheck; no `depends_on` (started with `--no-deps`). |
+| `airflow-db` | batch | — | `postgres:16-alpine`, database `airflow`, volume `airflow-db`, `mem_limit: 256m`, `restart: "no"`. Airflow's metadata only; never `ops-db`. |
+| `airflow-scheduler` | batch | — | `dockwatch-airflow:2.11.2` (`infra/airflow/Dockerfile`: `apache/airflow:2.11.2-python3.12` + `trino`, `pydantic-settings`, `pytest` through Airflow's constraints, `psycopg[binary]==3.3.6`); `mem_limit: 1g`; only via `scheduler-up`. |
+| `airflow-webserver` | batch | 18090 | Same image, `AIRFLOW__WEBSERVER__WORKERS=1`, `mem_limit: 1g`; never started by the checks. |
+| `airflow-cli` | airflow-cli | — | Same image, one-shot `docker compose run --rm --no-deps` (`dag-test`, `airflow …`, `db migrate`); `mem_limit: 1g`. |
 | `status-stream` | spark | 4040 (Spark UI) | The M2 streaming job; image `dockwatch-spark:3.5.5` (`infra/spark/Dockerfile`: Spark 3.5.5, Java 17, Iceberg 1.6.1 + AWS bundle, Kafka connector, pandas, pyarrow, pytest); `src/` mounted read-only; checkpoints in volume `dockwatch_checkpoints`; 2 GB memory limit; `restart: "no"` (on demand only). |
 
 ### Website (`web/`), static, no build step
@@ -335,8 +465,11 @@ Remote state backend commented out until the AWS account exists.
   from the archive), `geo`, `ops-schema` (schema.sql + migrations on `ops`), `ops-sim` (`seeded --seed --events`,
   `live`), `ops-explain` (`--out`, default `sql/ops/PLANS.md`), `connect-up`, `connect-stop`, `cdc-reset`,
   `cdc-catchup [--replay]`, `cdc-verify`, `cdc-e2e [--seed --events --stations]`, `tf-fmt`, `tf-fmt-check`
-  (`terraform fmt -check -recursive -diff`, for CI), `tf-validate`.
-- **Host tests:** 76 pass, 2 skipped (`python tasks.py test`; the two skips are the `tests/spark` modules): ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
+  (`terraform fmt -check -recursive -diff`, for CI), `tf-validate`; batch (M4a): `batch-up`, `batch-stop`,
+  `airflow <args>`, `dag-test <dag_id> [key=value …]`, `test-airflow`, `scheduler-up`, `scheduler-stop`,
+  `trino-sql "<query>"`. Before any task, `tasks.py` refuses to run from a path whose casing differs from the
+  containers' (`compose_cwd_refusal`).
+- **Host tests:** 98 pass, 3 skipped (`python tasks.py test`; the skips are the two `tests/spark` modules and `tests/airflow`): batch (`tests/test_batch.py`, 22: the 9 maintenance tables, the SQL with its retention parameters, retention below 1 day refused, before / after rows, a changed row count refused, Trino refused beside Spark / Connect and Spark / Connect / `catchup` refused beside Trino, the slot decision (catch up / lost never resets / healthy skips), the keepalive always stopping Connect, touching one captured row only after the connector runs (and again while a confirmed touch leaves the slot pinned; an empty `vans` refused), a keepalive timeout writing a `failed` line with the stuck `confirmed_flush_lsn` and target and failing without retry, the alert line and SNS publish, `default_args`, the evolution summary and day choice, the casing guard refusing a different casing and allowing the creating path or no containers, `dag-test` conf parsing), ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
   replay builder (`tests/test_replay.py`, 7 tests: full first frame then deltas, the shared `classify()` rule, a
   Pacific day across two UTC partitions, decoded frames equal the snapshots, a synthetic full day of 641 stations ×
   1440 frames at 80 changes per frame fits the 1.5 MB budget with the real writer (1,411,600 bytes), the CLI on an
@@ -372,6 +505,13 @@ Remote state backend commented out until the AWS account exists.
   `data/*.json` to `tests/web/fixtures/` (a real 641-station export, and `replay.json` built from the real archive
   with `--step 600`, 51 frames) and fake time with `page.clock`; `data/replay.json` is a 404 unless a test asks for
   the fixture.
+- **Airflow tests:** 7 pass in the Airflow image (`python tasks.py test-airflow`: `tests/airflow/test_dags.py` with a
+  throwaway SQLite metadata DB): the DagBag imports the three DAGs without errors; every task retries 3 times with
+  exponential backoff (1 min, cap 30 min), a timeout and the failure callback, and every last task has an `sla`;
+  schedules and `catchup=False`; real `TaskInstance.next_retry_datetime` delays grow 60–120 s, 120–240 s, … up to
+  1,800 s; a real `dag.test()` of a failing task writes one `task_failed` line; an SLA miss writes a `sla_miss` line; `runstate.fail_stale` fails a
+  DAG's `running` run and its task instance, leaving a `success` run and another DAG's run untouched.
+  The module skips on the host through `pytest.importorskip("airflow.models")`.
 - **Ops DB integration tests** (`tests/test_ops_db.py`, marked `integration`, not in CI): 6 pass after `python tasks.py ops-schema` (foreign keys, CHECK constraints, `updated_at` trigger, REPLICA IDENTITY FULL, the publication's five tables, each in a transaction that is rolled back, so they leave no rows and no CDC events; and `slot_status()` reading `reserved` from a temporary physical slot the test creates and drops, never touching `dockwatch_ops`).
 - `inspect`, `verify-lake` and `sql` run Spark with whole-stage codegen **off** (a JVM crash otherwise; see DEVLOG).
 - Lint: ruff, line length 120.
@@ -406,7 +546,8 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
 - Latest run on Node 24 with the bumped actions: **passed** — run 38015779233 on commit 4f0dd72, all five jobs green, no deprecation annotations. https://github.com/braaaeeedyn/dockwatch/actions/runs/38015779233
 - **Not in CI:** `deploy.yml` (publishing `web/` to S3 needs the AWS account), `terraform plan` (needs the AWS
   account and the GitHub OIDC role), `dbt compile` (arrives with M5), the integration and network tests, the Kafka
-  stack and `verify-lake`.
+  stack and `verify-lake`, and Airflow / Trino (`test-airflow`, `dag-test`; the host `tests/test_batch.py` does run
+  in the Python job).
 
 ---
 
@@ -417,7 +558,8 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   PowerShell, Python `shell=True`) makes Compose recreate `ops-db` mid-run, which drops iceberg-rest's catalog
   connections and fails the CDC apply (`UncheckedSQLException ... iceberg_tables`). Always run tasks from Git Bash in
   the lowercase path. Recovery (keeps the volume): `docker compose --profile stream up -d --wait --no-deps ops-db &&
-  docker compose --profile stream restart iceberg-rest`.
+  docker compose --profile stream restart iceberg-rest`. `tasks.py` now refuses every task when the shell's path
+  differs from the containers' `working_dir` label (it cannot protect raw `docker compose` commands).
 - **Local / CI Node split:** CI runs Node 24; this machine runs Node **v20.18.0**, which is past end of life
   (2026-04-30) and outside Playwright 1.64's documented support ("latest 22.x, 24.x or 26.x"). It still installs and
   runs the suite (Playwright itself declares `>=20`), so `engines` is `>=20`. **Upgrade step (the user's):** install
@@ -461,18 +603,32 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   `iceberg_catalog` database's WAL. `max_slot_wal_keep_size=1024MB` bounds that, at a price: if more than 1 GB of
   WAL is written before the next `connect-up`, Postgres invalidates the slot (`wal_status = 'lost'`), `connect-up`
   refuses, and CDC has to be rebuilt with `python tasks.py cdc-reset` (drops lake.ops.*, the slot, the ops tables,
-  re-created empty, and the CDC topics) and a fresh snapshot. Nothing schedules Connect or a catch-up, and nothing
-  alerts on a falling `safe_wal_size`.
+  re-created empty, and the CDC topics) and a fresh snapshot. `cdc_slot_keepalive` catches the slot up and alerts
+  on a low `safe_wal_size`, but only while the scheduler runs (it does not run 24/7) or when run by hand.
+- **Each keepalive catch-up writes to the ops data:** after a restart Debezium confirms nothing until it streams a
+  captured change past its stored offset, and WAL from other databases, empty transactions and
+  `pg_logical_emit_message` never reach it (the `heartbeat.action.query` experiment changed nothing). So each
+  catch-up bumps `updated_at` of the lowest-id van, usually twice: one or two `u` events on `ops.public.vans` per
+  catch-up (at most 24 a day hourly). `cdc-catchup` applies them like any other change, and `cdc-e2e` resets the
+  topics first, so its per-op counts are unaffected; `cdc-verify` without a `cdc-catchup` after a keepalive sees
+  that van's newer `updated_at` in Postgres.
 - **The CDC topics grow without bound:** `ops.public.*` have `retention.ms=-1` so a replay rebuild never misses old
-  rows; one e2e adds ~3k events (a few MB) and `cdc-reset` clears them. Revisit (compaction plus snapshot-based
-  rebuilds, M4) past ~1 GB or ~1M events.
+  rows; one e2e adds ~3k events (a few MB) and `cdc-reset` clears them. Decided in M4a: they stay
+  `cleanup.policy=delete` (compaction would need tombstones, which are off, and would break the per-op CDC counts);
+  revisit (compaction plus snapshot-based rebuilds) past ~1 GB or ~1M events. The Iceberg side (`lake.ops.*`) is
+  compacted by `iceberg_maintenance`.
 - **Hard deletes and replay:** a replay that splits a deleted row's insert and delete into different batches
   re-inserts the row for one batch, then deletes it again; the end state is identical (checked by `cdc-verify`).
 - **Type changes are not applied:** a changed Postgres column type, or a Connect type the apply does not know (e.g.
   `numeric`, `date`), stops the apply with `SchemaError`. Columns are add-only; a dropped Postgres column would stay
   in Iceberg (and `cdc-verify` would still compare only Postgres's columns).
-- **Partition evolution** not done (moved to M4 with compaction).
-- **Small files:** each streaming query writes ≥ 1 file per minute (silver ≈ 45 KB/file). Compaction arrives in M4.
+- **Small files:** each streaming query writes ≥ 1 file per minute (silver ≈ 45 KB/file); `iceberg_maintenance`
+  compacts them (405 → 4 silver files in its first run), but only when someone runs it: the scheduler does not run
+  24/7 and the DAGs are paused by default.
+- **`docker.sock` in the Airflow containers** is root-equivalent access to the Docker VM. Local only; the code only
+  lists containers and starts / stops `connect`.
+- **Not in M4a (M4b, next):** `trip_history_monthly` (Bay Wheels trip ZIPs, `bronze.trips`, backfill), the dbt
+  project (`dbt-trino` / `dbt-athena`, the three marts and tests), `marts_daily` and `web/data/insights/*.json`.
 - `live.json` is ~200 KB uncompressed; fine for now, worth trimming or gzip-serving later (F5).
 - **AWS steps are manual** and not done; `checkpoint_root` on AWS will need `s3a://` + hadoop-aws jars (not in the image yet).
 - Some stations report a `last_reported` weeks old → `offline`. 35 stations have no `region_id` → placed by coordinates.

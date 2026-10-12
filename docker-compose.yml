@@ -1,11 +1,43 @@
 # DockWatch local stack. Services are grouped into profiles so they fit in ~8 GB of Docker memory:
 #   stream: Redpanda (+ Console), SeaweedFS (S3 API), Iceberg REST catalog, Postgres (ops DB with logical
 #           replication, plus the iceberg_catalog database)
-#   batch:  Airflow, Trino            (added in M4)
+#   batch:  Trino, Airflow (+ its own airflow-db), on demand only (M4a; python tasks.py batch-up)
 #   obs:    Marquez                   (added in M5)
 # Start with: python tasks.py up stream
 
 name: dockwatch
+
+# Shared by airflow-scheduler / airflow-webserver / airflow-cli (M4a). Metadata lives in airflow-db, never ops-db:
+# an always-writing scheduler there would make WAL the CDC slot dockwatch_ops has to retain.
+x-airflow: &airflow
+  build: infra/airflow
+  image: dockwatch-airflow:2.11.2
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow-local-only@airflow-db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__PARALLELISM: "2"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__WEBSERVER__SECRET_KEY: dockwatch-local-only
+    AIRFLOW__OPENLINEAGE__DISABLED: "true"
+    AIRFLOW__LOGGING__LOGGING_CONFIG_CLASS: dockwatch.batch.airflow_logging.LOGGING_CONFIG
+    PYTHONPATH: /opt/dockwatch/src
+    DOCKWATCH_DATA_DIR: /opt/dockwatch/data
+    DOCKWATCH_OPS_DB_DSN: postgresql://ops:ops-local-only@ops-db:5432/ops
+    DOCKWATCH_TRINO_URL: http://trino:8080
+    DOCKWATCH_CONNECT_URL: http://connect:8083
+    DOCKWATCH_ALERTS_TOPIC_ARN: ${DOCKWATCH_ALERTS_TOPIC_ARN:-}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./src:/opt/dockwatch/src:ro
+    - ./data:/opt/dockwatch/data
+    # Only to list running containers (memory guard) and docker start / stop the existing `connect` container
+    # (cdc_slot_keepalive). Never compose, never creates containers. Root-equivalent on the Docker VM: local only.
+    - /var/run/docker.sock:/var/run/docker.sock
+  mem_limit: 1g
+  restart: "no"
 
 services:
   redpanda:
@@ -171,8 +203,75 @@ services:
     mem_limit: 2g
     restart: "no"
 
+  trino:
+    # M4a batch SQL engine (Iceberg maintenance, partition evolution; dbt-trino in M4b). Catalog `lake` =
+    # the same Iceberg REST catalog and SeaweedFS warehouse as Spark (infra/trino/etc). On demand only
+    # (python tasks.py batch-up / batch-stop); tasks refuse to run it beside Spark or Kafka Connect.
+    # The image tag is pinned in tasks.py TRINO_IMAGE too.
+    profiles: [batch]
+    image: trinodb/trino:483
+    environment:
+      AWS_ACCESS_KEY_ID: ${DOCKWATCH_S3_ACCESS_KEY:-dockwatch}
+      AWS_SECRET_ACCESS_KEY: ${DOCKWATCH_S3_SECRET_KEY:-dockwatch-local-only}
+      AWS_REGION: ${DOCKWATCH_S3_REGION:-us-west-2}
+    volumes:
+      - ./infra/trino/etc:/etc/trino:ro
+    ports: ["18080:8080"]
+    # Heap 1G (jvm.config). 1536m was measured full (1532 MiB peak in iceberg_maintenance), so 2g per plan.md.
+    mem_limit: 2g
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+
+  airflow-db:
+    # Airflow's metadata database (M4a). Its own Postgres and volume, never ops-db (see x-airflow).
+    profiles: [batch]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow-local-only
+    volumes:
+      - airflow-db:/var/lib/postgresql/data
+    mem_limit: 256m
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  airflow-scheduler:
+    # Started only on purpose (python tasks.py scheduler-up); DAGs are paused at creation.
+    <<: *airflow
+    profiles: [batch]
+    command: scheduler
+    depends_on:
+      airflow-db: { condition: service_healthy }
+
+  airflow-webserver:
+    # UI on http://localhost:18090; never started by the checks.
+    <<: *airflow
+    profiles: [batch]
+    command: webserver
+    environment:
+      <<: *airflow-env
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+    ports: ["18090:8080"]
+    depends_on:
+      airflow-db: { condition: service_healthy }
+
+  airflow-cli:
+    # One-shot Airflow CLI: python tasks.py airflow <args> / dag-test (docker compose run --rm --no-deps).
+    <<: *airflow
+    profiles: [airflow-cli]
+
 volumes:
   checkpoints:
   redpanda:
   s3:
   ops-db:
+  airflow-db:

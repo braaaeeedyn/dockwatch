@@ -254,3 +254,72 @@ leaves gaps in the offsets, which Spark's Kafka source treats as data loss by de
 each row. DockWatch sets **`retention.ms=-1`** (keep forever, `cleanup.policy=delete`) on the five change topics only,
 and accepts that they grow; `cdc-reset` clears them, and compaction plus snapshot-based rebuilds is the plan once they
 get large.
+
+## Table maintenance and orchestration (M4a)
+**Small files.** A streaming job commits to Iceberg every minute, and every commit writes at least one new data file
+per table and partition, plus a new snapshot and manifest. After a few days `silver.station_status` had 405 files of
+~20 KB each for under a million rows. Every query has to open, and plan around, every one of those files, so reads get
+slower as the table ages even though the data is small.
+
+**Compaction** rewrites many small files into a few large ones without changing a single row. In Trino it is
+`ALTER TABLE lake.silver.station_status EXECUTE optimize(file_size_threshold => '100MB')`: every file under the
+threshold is read and rewritten, and the change is committed as one new snapshot whose `operation` is `replace`
+(the rows are the same, only the files changed). DockWatch's first run took silver from 405 files to 4, one per day
+partition. Because a `replace` snapshot adds no data, `verify-lake` ignores it when it asks "did anything commit in
+the last hour?"; otherwise a maintenance run would make a stopped stream look healthy.
+
+**`expire_snapshots`.** Every commit keeps the previous snapshots, so you can time-travel to them; that is also why
+the old small files stay on disk after compaction: an old snapshot still points at them. `EXECUTE
+expire_snapshots(retention_threshold => '1d')` forgets snapshots older than a day (never the current one) and deletes
+the files only they used. After it you can no longer read the table "as of" two days ago. DockWatch refuses less
+than a day, in code and in the Trino catalog: Spark is never writing while Trino runs, but a day of history is cheap
+insurance. So when every snapshot is younger than a day, a compacting run ends with one *more* snapshot than
+it started with: the `replace` that `optimize` just committed is the current one, and nothing is old enough to expire.
+
+**Orphan files** are files in the table's folder that no snapshot references, typically left by a write that
+failed before it committed. Nothing reads them and nothing would ever delete them, so `EXECUTE
+remove_orphan_files(retention_threshold => '1d')` lists the folder, compares it with the metadata and deletes what is
+unreferenced and older than a day (younger files might belong to a commit still in flight). The first run removed 75
+orphans from bronze.
+
+**Partition spec and partition evolution.** An Iceberg table's partition spec says how rows are grouped into folders
+and files, for example `day(snapshot_ts)`: one partition per UTC day, so a query for one day skips every other day's
+files. Unlike Hive-style tables, the spec can change without rewriting data (*partition evolution*): `ALTER TABLE …
+SET PROPERTIES partitioning = ARRAY['hour(snapshot_ts)']` adds a new spec with a new id; old files keep spec 0, new
+files are written with spec 1, and queries plan across both. The trade-off is file count: by hour, a stream writes
+up to 24 times as many partitions a day, and compaction can never merge files across partitions.
+`partition_evolution_demo` measures that on a lab copy (`lab.status_partition_evolution`) before production tables
+change.
+
+**DAG.** Airflow describes a workflow as a DAG, a directed acyclic graph of tasks (`guard → maintain → record`):
+each task runs only after the ones it depends on, and no path loops back. A DAG file is Python that builds the
+graph; Airflow's scheduler parses it and decides when each task runs. DockWatch keeps the DAG files thin and puts the
+logic in `src/dockwatch/batch/`, where host tests cover it without Airflow.
+
+**Logical date.** Each run of a scheduled DAG covers a data interval, and its *logical date* (`execution_date` in
+older Airflow) is the start of that interval, not the moment it runs: the `@daily` run that starts just after
+midnight on Oct 10 has logical date Oct 9. That makes a run repeatable: rerun the Oct 9 run next week and it still
+means "Oct 9". `python tasks.py dag-test` passes an explicit logical date so it can find its run afterwards.
+
+**Catchup.** If a DAG's `start_date` is in the past, or the scheduler was off for a while, Airflow by default creates
+a run for every missed interval (*catchup*). That is what a backfill wants (M4b's `trip_history_monthly` will load
+history that way), but not maintenance: compacting yesterday's state 30 times is pointless. DockWatch's DAGs set
+`catchup=False` and `max_active_runs=1`, so a scheduler that was off just runs the latest interval once.
+
+**Retries with exponential backoff.** Most batch failures are transient (Trino restarting, a network blip), so each
+task gets `retries=3`. With exponential backoff the wait doubles each time, starting at 1 minute and capped at 30
+(plus some jitter so many tasks don't retry in lockstep): a short outage is retried quickly, a long one is not
+hammered. Failures that a retry cannot fix, such as a Spark job running beside Trino or a lost replication slot,
+raise `AirflowFailException` and fail at once. Whatever finally fails calls `on_failure_callback`, which writes one
+alert line to `data/airflow/alerts.jsonl`.
+
+**Keeping an idle replication slot moving.** A logical replication slot pins every byte of WAL written after the
+last position its consumer *confirmed*, in any database of the cluster. Two details decide how the slot is freed.
+First, Debezium only confirms a position after it has streamed a change from a captured table past its stored
+offset; WAL from other databases is filtered out before it reaches Debezium, and a transaction with no captured
+change arrives as nothing at all. Second, Postgres frees WAL by moving the slot's `restart_lsn`, and it moves it only
+when a confirmed position passes a "restart candidate" taken from a running-transactions record in the WAL; it holds
+one candidate at a time. So `cdc_slot_keepalive` makes the change itself: once the connector runs it updates one van's
+`updated_at` and waits for the confirm; if the first confirm only consumed an old candidate and the slot still pins
+the backlog, it touches the row once more. The price is visible in the data: each catch-up adds one or two `u`
+events on `ops.public.vans` and a newer `updated_at` on one van.

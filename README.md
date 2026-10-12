@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; next M4b: trip history, dbt marts). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -74,7 +74,24 @@ python tasks.py cdc-reset            # drop lake.ops.*, the replication slot, th
 If `connect-up` stops with "replication slot dockwatch_ops is lost", more than 1 GB of WAL was written while Connect
 was stopped (`max_slot_wal_keep_size`); rebuild CDC with `python tasks.py cdc-reset`.
 
-Redpanda Console: http://localhost:8088 · local S3 endpoint: http://localhost:8333
+Batch and orchestration (M4a): Airflow 2.11.2 (LocalExecutor, its own `airflow-db`) drives Trino 483 over the same
+Iceberg catalog. Both start on demand and never beside Spark or Kafka Connect (memory); DAGs are paused by default:
+
+```bash
+python tasks.py batch-up             # Trino + airflow-db (refuses while Spark or Connect runs), airflow db migrate
+python tasks.py dag-test iceberg_maintenance          # one bounded DAG run -> data/airflow/dag-test-<dag>.json
+python tasks.py dag-test partition_evolution_demo     # (key=value pairs become the run conf)
+python tasks.py dag-test cdc_slot_keepalive catch_up_above_mb=16   # starts / stops Connect; touches one van row so the slot advances
+python tasks.py trino-sql "SELECT * FROM lake.metrics.maintenance_runs"
+python tasks.py batch-stop           # stop Trino and Airflow (volumes kept); always before catchup / stream / CDC tasks
+python tasks.py test-airflow         # DAG tests in the Airflow image (SQLite metadata DB)
+python tasks.py scheduler-up         # the Airflow scheduler, for a smoke test (scheduler-stop stops it)
+```
+
+Run every task from Git Bash in the folder path the containers were created from: `tasks.py` refuses when the
+path's letter casing differs, because Docker Compose would recreate the stream containers.
+
+Redpanda Console: http://localhost:8088 · local S3 endpoint: http://localhost:8333 · Trino: http://localhost:18080
 
 The site in `web/` is static (no build step). Serve it and run its tests (Node 20 or newer locally; CI runs Node 24):
 

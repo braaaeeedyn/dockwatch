@@ -958,3 +958,177 @@ can only be proved by the GitHub run after the push.
   recreating ops-db itself; the user then authorized the restore (`ops-db` recreated from the lowercase path with the
   volume kept, iceberg-rest restarted). The Checker, run from Git Bash, then passed all 99 checks with ops-db untouched.
 - `upload-artifact@v7` is only exercised when a Playwright job fails, so it is still unproven on GitHub.
+
+## 2026-10-10 · M4a · Airflow + Trino on demand, Iceberg maintenance, retries / alerts, casing guard (in progress)
+**Split.** M4 is two loops. **M4a** (this one): Airflow and Trino in the `batch` profile, `iceberg_maintenance`,
+`partition_evolution_demo` (M2's deferred item), `cdc_slot_keepalive`, retries and alerts, the path-casing guard.
+**M4b** (next): `trip_history_monthly` (trip ZIPs, both schemas, `bronze.trips`, backfill), the dbt project
+(`dbt-trino` locally, `dbt-athena` on AWS) with the three marts, and `marts_daily`. Each of Airflow, Trino, dbt and
+the trip download is new on a host with ~1–3 GB free, so one loop for all of it would not fit.
+
+**Did**
+- **Trino 483** (`trinodb/trino:483`, service `trino`, profile `batch`) is the batch SQL engine: one JVM (heap
+  `-Xmx1G`, `query.max-memory-per-node` 512 MB + heap headroom 256 MB, `task.max-writer-count=1`) for maintenance now
+  and dbt in M4b. Athena engine v3 is Trino, so one dbt project can target both. Catalog `lake` uses the same Iceberg
+  REST catalog and SeaweedFS warehouse as Spark (`fs.native-s3.enabled`, path-style), with
+  `iceberg.expire-snapshots.min-retention=1d` and `iceberg.remove-orphan-files.min-retention=1d` (Trino's 7-day
+  default would do nothing on a lake a few days old).
+- **Airflow 2.11.2** on Python 3.12 (`dockwatch-airflow:2.11.2` from `infra/airflow/Dockerfile`; `trino`,
+  `pydantic-settings`, `pytest` through Airflow's constraints file, `psycopg[binary]==3.3.6` pinned to the host lock),
+  **LocalExecutor**, metadata in its own **`airflow-db`** (`postgres:16-alpine`, `mem_limit: 256m`, own volume).
+  Not `ops-db`: a scheduler writing there all day would make WAL that the CDC slot `dockwatch_ops` has to retain,
+  eating the 1 GB `max_slot_wal_keep_size` budget. Services `airflow-scheduler`, `airflow-webserver` (port 18090,
+  one worker) and `airflow-cli` (one-shot runs), all `mem_limit: 1g`, `restart: "no"`, DAGs paused at creation.
+- **Tasks** (`src/dockwatch/batch`, host CLI `python -m dockwatch.batch`): `batch-up`, `batch-stop`, `airflow`,
+  `dag-test` (bounded `airflow dags test` in `airflow-cli`; the run's real state is read from the metadata DB because
+  `dags test` exits 0 on a failed run; peak memory per container; `data/airflow/dag-test-<dag>.json`),
+  `test-airflow`, `scheduler-up` / `scheduler-stop`, `trino-sql`.
+- **Memory guard** (`batch/guard.py`, stdlib only): batch work refuses beside `status-stream`, `cdc-apply` or
+  `connect`; `stream`, `catchup`, `inspect`, `verify-lake`, `sql`, `connect-up` and the CDC tasks refuse while Trino
+  runs (the message names Trino and `batch-stop`). `cdc/runner.py`'s `guard()` consults it too.
+- **DAGs:** `iceberg_maintenance` (`@daily`: `optimize`, `expire_snapshots`, `remove_orphan_files` per table, one
+  table at a time, before / after into `lake.metrics.maintenance_runs`), `partition_evolution_demo` (manual) and
+  `cdc_slot_keepalive` (`@hourly`), all `catchup=False`, `max_active_runs=1`.
+- **Retries and alerts:** one shared `default_args`: `retries=3`, 1 min with exponential backoff up to 30 min, a
+  per-task timeout, `on_failure_callback`; a DAG `sla_miss_callback` and an `sla` on each last task. An alert is one
+  JSON line in `data/airflow/alerts.jsonl` plus an ERROR log line, and an SNS message when
+  `DOCKWATCH_ALERTS_TOPIC_ARN` is set. Guard failures raise `AirflowFailException` (no retry).
+- **`verify-lake` ignores `replace` snapshots** (compaction) in its freshness rule, so a maintenance run alone cannot
+  make a stopped stream look fresh.
+- **Path-casing guard:** `tasks.py` refuses every task when `os.getcwd()` differs from the
+  `com.docker.compose.project.working_dir` label of the existing containers, with the recovery text; Docker down or
+  no containers (CI) allow. New compose calls run from the inherited cwd, never a resolved path.
+- **`docker.sock`** is mounted only into the Airflow services (listing containers, `docker start` / `stop` of the
+  existing `connect`); the Airflow user reaches it through group 0 on Docker Desktop, so no `user:` / `group_add`.
+  Root-equivalent on the Docker VM; recorded as a local-only gap.
+- **Ops topics stay uncompacted (decision):** `ops.public.*` keep `cleanup.policy=delete`, `retention.ms=-1`.
+  Compaction needs tombstones (off) and would break `cdc-e2e`'s per-op counts; revisit past ~1 GB / ~1M events.
+  The Iceberg side, `lake.ops.*`, is compacted by `iceberg_maintenance`.
+- Airflow logging config (`batch/airflow_logging.py`): alembic's plugin-setup INFO lines were printed to stdout by
+  every Airflow CLI call, ahead of `-o json` output; the `alembic` loggers now log warnings only.
+
+**Measured**
+- **Spike:** Trino read all 9 tables (bronze / silver 989,753 rows each, `availability_5m` 202,182, episodes 1,855,
+  ops 80 / 1,774 / 4 / 111 / 123) and wrote to SeaweedFS (CTAS, INSERT, `optimize`, `expire_snapshots`,
+  `remove_orphan_files` on a lab table) with no S3 checksum setting needed. After a Trino maintenance run, Spark
+  `catchup` (31 s) and `verify-lake` passed: the current bronze / silver snapshot is a Spark `append` after the
+  `replace`.
+- **`iceberg_maintenance`** (`dag-test`, 37 s): bronze 71 → 4 files (17.8x), 68 → 10 snapshots, 75 orphan files
+  removed; silver 405 → 4 files, 7.6 MB → 3.4 MB, 95 → 19 snapshots; `availability_5m` 39 → 4 files; episodes 4 → 4
+  files, 67 → 9 snapshots; the five `ops.*` tables already had one file each (8 snapshots, all younger than a day).
+  One file per day partition after optimize; rows unchanged on every table.
+- **Peaks:** Trino 1,532 MiB against its first `mem_limit` of 1536m. Per the plan's rule (> 1.4 GiB) the
+  `mem_limit` is now 2g; the heap stays 1 GB. `airflow-cli` 233 MiB, `airflow-db` 49 MiB, the scheduler 395 MiB.
+  `batch-up` takes 28 s; `test-airflow` 22 s (6 tests).
+- **Scheduler smoke test:** healthy within the 180 s, the three DAGs listed and paused, no import errors.
+  Airflow 2.11.2's `dags list -o json` names the column `is_paused`.
+- **CDC slot keepalive — Debezium does not advance on WAL from another database.** With 78.7 MiB retained (the
+  baseline's probe wrote it in a scratch database), `cdc_slot_keepalive` started Connect, the connector was RUNNING
+  and the slot active, and for 10 minutes `confirmed_flush_lsn` stayed at `0/59FE4D40` while `sent_lsn` followed the
+  current WAL. Connect logged "Received offset commit request on 'LSN{0/59FE4D40}', but ignoring it. LSN flushing is
+  not allowed yet": after a restart Debezium flushes nothing until a change from the `ops` database arrives past its
+  stored offset. The plan's fallback, `heartbeat.action.query` = `SELECT pg_logical_emit_message(false,
+  'dockwatch-heartbeat', now()::text)`, was tried three times (with `message.prefix.exclude.list`, with nothing, and
+  with `message.prefix.include.list`; 1–3 min each): the query ran (WAL grew ~100 bytes per 10 s), but no message
+  reached Debezium (no `ops.message` topic) and the slot did not move. `infra/connect/ops.json` is unchanged and the
+  stored connector config was re-registered from it. `safe_wal_size` is ~992 MB, `reserved`.
+
+**Not done yet (M4a)**
+- Partition evolution: `partition_evolution_demo` (day, then hour, on a lab copy) has not run yet, so there are no
+  day vs hour file numbers; M2's partition-evolution item stays unticked until it has.
+- `cdc_slot_keepalive` cannot catch up an idle slot (above); its decision, guard, Docker start / stop, alerting
+  and `slot_health.jsonl` lines are built and unit-tested.
+
+## 2026-10-10 · M4a · keepalive by touching a captured row, partition evolution measured (M4a done)
+**Keepalive: a real change on a captured table replaces the heartbeat-query fallback.**
+- **Why the first keepalive hung:** after a restart Debezium flushes no LSN until it streams a captured change past
+  its stored offset. WAL from other databases is never decoded into this slot, pgoutput drops empty transactions,
+  and `pg_logical_emit_message` (the plan's `heartbeat.action.query` fallback, three variants, entry above) never
+  reached Debezium. A dedicated heartbeat table is ruled out because the connector's `table.include.list` and the
+  publication must stay exactly the five ops tables. The one lever left is a real change to a captured table.
+- **Did:** once the connector is `RUNNING`, `slot.py` runs one autocommit `UPDATE vans SET updated_at = now() WHERE
+  van_id = (SELECT min(van_id) FROM vans) RETURNING pg_current_wal_lsn()` (an empty `vans` fails clearly) and waits
+  until `confirmed_flush_lsn` ≥ max(LSN at start, touch LSN) and retained < 16 MiB, all inside the 600 s
+  `timeout_s`. On timeout Connect is stopped (`finally`), a `failed` line names the stuck `confirmed_flush_lsn` and
+  the target, and `dag_tasks` raises `AirflowFailException`, so a hung catch-up is not retried into 4 × 600 s.
+  `slot.py` stays free of Airflow (`KeepaliveError`). New optional `touch_lsn` on `slot_health.jsonl` lines.
+  `infra/connect/ops.json` is unchanged.
+- **One touch was not enough (measured).** First run (77.7 MiB WAL probe on top of 78 MiB already retained):
+  `confirmed_flush_lsn` moved from `0/66DA2B58` past the touch to `0/70978298` within seconds, but `restart_lsn`
+  only moved to `0/66DA4B68`, so 155.8 MiB stayed retained. Postgres moves `restart_lsn` only when a confirmed LSN
+  passes a pending restart candidate, keeps one candidate at a time (taken from a running-xacts record), and decoding
+  the backlog leaves that candidate near the backlog's start; the first confirm applies it, and an idle database
+  logs no newer running-xacts record for the next one. A second (manual, diagnostic) touch made the slot drop to 56
+  bytes 16 s later. So `catch_up` now touches again, at most every 20 s (after the bgwriter's 15 s running-xacts
+  interval), whenever a touch is confirmed but retained is still ≥ 16 MiB. That diagnostic run is not counted.
+- **Measured (clean run, 2026-10-10 13:56 UTC,** `dag-test cdc_slot_keepalive catch_up_above_mb=16` after the
+  checker's 77.7 MiB probe): retained 81,432,328 B → 56 B, `safe_wal_size` 999,157,016 → 1,082,994,728 B, slot
+  `reserved`; touch 1 at `0/7572CA98` confirmed (`0/7572CE58`) with 77.7 MiB still retained, touch 2 at `0/7572CE90`,
+  then confirmed `0/7572CFA0` = `restart_lsn`. Connect up 42.8 s, `dag-test` 61.2 s; peaks `connect` 453 MiB,
+  `airflow-cli` 253 MiB, `airflow-db` 30 MiB. `check_g.py keepalive`: ok.
+- **Trade-off:** each catch-up bumps the lowest-id van's `updated_at`, usually twice: one or two `u` events on
+  `ops.public.vans` per catch-up, at most ~48 a day at the hourly cadence (catch-ups only happen past 256 MiB
+  retained or after 24 h, so normally far fewer). `cdc-catchup` applies them like any other change; `cdc-e2e` resets
+  the topics first, so its per-op counts are unaffected. The keepalive threshold stays 256 MB: no idle-growth rate
+  from `slot_health` lines yet suggests it fills in < 6 h.
+
+**Partition evolution measured (M2's deferred item, done).** `partition_evolution_demo` (Checker's run, 31.4 s,
+days 2026-10-08 / 2026-10-09, one INSERT per hour) on `lab.status_partition_evolution`: 821,289 rows. Spec 0
+(`day`) held D1's 551,260 rows in 15 files in 1 partition; after evolving to `hour`, D2 added 10 files in 10
+partitions (270,029 rows); `optimize` rewrote everything into the current spec: 25 partitions, 25 files, 2.6 MB. So
+hourly partitioning keeps one file per hour with data even after compaction (a floor of up to 24 files a day),
+where daily compacts a day to one file. Production tables stay `day()` (the expected outcome). Trino peaked at
+1,803 MiB in that run, under the 2 GiB `mem_limit` set earlier in this loop; the heap stays 1 GB.
+
+**DAGs stay paused.** Each DAG now also sets `is_paused_upon_creation=True` (beside `DAGS_ARE_PAUSED_AT_CREATION`).
+`airflow dags test` neither creates nor unpauses DAG rows (it only adds runs), so earlier `dag-test` runs leave the
+rows paused: the scheduler smoke test lists all three with `is_paused` true, healthy, no import errors, scheduler
+382 MiB. The iteration-1 failure was the check reading `paused` instead of Airflow 2.11's `is_paused`.
+
+**Tests:** `tests/test_batch.py` 22 (new: the touch happens once, after `RUNNING`, with a second touch only when a
+confirmed touch leaves the slot pinned, and an empty `vans` refused; a timeout fails through
+`AirflowFailException` with a `failed` line naming the stuck LSN and target, and Connect stopped). Host suite 98
+pass, 3 skipped; `test-airflow` 6 pass.
+
+## 2026-10-12 · M4a · compaction adds a `replace` snapshot, stale dag_runs failed by `dag-test`, 1.5 GB memory gate
+**Snapshot counts after maintenance (ruling, no code change).** Loop G's check required `snapshots_after <=
+snapshots_before`, and failed in its iteration 2. The maintenance code was right; the rule was not:
+- `optimize` that rewrites files commits exactly one new snapshot (operation `replace`) and removes none.
+- `expire_snapshots(retention_threshold => '1d')` removes only snapshots older than a day, never the current one,
+  which after a compaction is that `replace`. Trino 483 has no `retain_last`, and the 1-day floor
+  (`iceberg.expire-snapshots.min-retention=1d`) stays.
+- Evidence: iteration 1 compacted bronze 6 → 4 files with snapshots 12 → 10 and silver 23 → 18, because day-old
+  snapshots were waiting to expire; iteration 2, 6.5 h later, compacted the same way but went 12 → 13 and 22 → 23.
+- So with every snapshot younger than a day a compacting run ends at before + 1. The order optimize → expire →
+  remove orphans stays. The new check allows exactly the run's own `replace` commit (nothing else may write the
+  table during the run), requires a compaction to show one, and requires that some run in
+  `lake.metrics.maintenance_runs` really expired snapshots.
+
+**Stale `running` dag_runs.** A killed `airflow dags test` left two `cdc_slot_keepalive` runs `running` in airflow-db
+(2026-10-10 06:54Z and 13:16Z). Their task instances have no job, so the scheduler's zombie detection never ends
+them, and with `max_active_runs=1` the scheduler would never start another run once the DAG is unpaused.
+- **Did:** `python -m dockwatch.batch.runstate fail-stale <dag_id>` marks every `running` / `queued` dag_run of the
+  DAG `failed` (`DagRun.set_state`) with its unfinished task instances (running, queued, scheduled, up_for_retry,
+  up_for_reschedule, deferred, restarting or no state), printing `FAILED_STALE_RUN <dag_id> <run_id>`. `dag-test`
+  runs it before `airflow dags test`, only when no `airflow-scheduler` container runs (a running dag_run may be live
+  then).
+- **Measured:** the keepalive `dag-test` printed both stale run_ids; afterwards no dag_run of the three DAGs is
+  `running` or `queued`.
+- **Test:** `tests/airflow/test_dags.py::test_dag_test_fails_stale_running_runs` (SQLite): the running run and its
+  task instance become `failed`; a `success` run and another DAG's running run are untouched. `test-airflow` 7 pass.
+
+**1.5 GB memory gate.** Loop G's Builder once started `test-airflow` at 1,179 MiB free. Now ≥ 1.5 GB host free is
+required before `test-airflow`, `batch-up` (Trino) and the keepalive (Connect + Airflow); the checks stop the
+`console` container if needed and do not run the step while still below. This run: 4.3 GB free before
+`test-airflow`, 4.4 GB before `batch-up`, 4.0 GB before the keepalive.
+
+**This run's numbers (2026-10-12 06:41 UTC, `dag-test iceberg_maintenance`, 27 s, ~10 min after the baseline run):**
+- Files: bronze 6 → 5, `silver.station_status` 11 → 5, `availability_5m` 6 → 5; one file per day partition (5
+  days). Episodes and the 5 `ops.*` tables unchanged.
+- Snapshots: bronze 3 → 4, silver 5 → 6, `availability_5m` 5 → 6 (each the `replace`), episodes 2 → 2, `ops.*` 8 → 8.
+  The baseline run at 06:30 UTC, with day-old snapshots to expire, compacted bronze 7 → 5, silver 17 → 5,
+  `availability_5m` 7 → 5 files and expired bronze 15 → 2 and silver 27 → 3 snapshots.
+- Trino peak 1,463 MiB (baseline: 1,691 MiB in maintenance, 1,773 MiB in partition evolution; 2 GiB limit),
+  `airflow-cli` 296 MiB. `batch-stop` → `catchup` → `verify-lake` → `check_g.py after`: ok.
+- Keepalive (`catch_up_above_mb=16` after a 77.8 MiB probe): retained 81,579,280 B → 56 B with two touches, Connect up
+  45.4 s, `dag-test` 61 s.

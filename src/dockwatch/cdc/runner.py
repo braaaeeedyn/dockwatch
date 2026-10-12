@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dockwatch.batch.guard import refusal as batch_refusal
 from dockwatch.cdc.checksum import table_checksum
 from dockwatch.cdc.guard import cdc_topics, refusal, slot_refusal, slot_warning
 from dockwatch.config import get_settings
@@ -87,7 +88,8 @@ def running(service: str) -> bool:
 
 
 def guard(task: str) -> None:
-    reason = refusal(task, running)
+    """Connect never beside Spark (cdc/guard.py), and neither beside Trino (batch/guard.py)."""
+    reason = refusal(task, running) or batch_refusal(task, running)
     if reason:
         raise CdcError(reason)
 

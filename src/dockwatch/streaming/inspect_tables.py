@@ -55,7 +55,7 @@ def check(spark, c: str, max_age_min: int) -> list[str]:
     for table in TABLES:
         age = q(
             f"SELECT (unix_timestamp(current_timestamp()) - unix_timestamp(max(committed_at))) / 60 age_min, "
-            f"count(*) n FROM {c}.{table}.snapshots"
+            f"count(*) n FROM {c}.{table}.snapshots WHERE operation <> 'replace'"  # compaction is not freshness
         ).first()
         print(f"check: {table} snapshots = {age.n}, last commit {age.age_min} min ago")
         if age.age_min is None or age.age_min > max_age_min:

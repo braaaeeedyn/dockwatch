@@ -7,9 +7,22 @@ import os
 import subprocess
 import sys
 
+# The stdlib-only batch guard (Trino never beside Spark / Connect); nothing else from src is imported here.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+from dockwatch.batch import guard as batch_guard  # noqa: E402
+
 TF_IMAGE = "hashicorp/terraform:1.9"
 # Kafka Connect + Debezium (M3, compose service `connect`, profile cdc). The same literal is in docker-compose.yml.
 CONNECT_IMAGE = "quay.io/debezium/connect:2.7.3.Final"
+# Trino (M4a, compose service `trino`, profile batch). The same literal is in docker-compose.yml.
+TRINO_IMAGE = "trinodb/trino:483"
+COMPOSE_PROJECT = "dockwatch"
+CASING_RECOVERY = (
+    "Run tasks from Git Bash in the exact path the containers were created from (cd /c/Users/brady/coding/dockwatch), "
+    "never from cmd.exe, PowerShell or Python shell=True. If ops-db was already recreated, recover (keeps the "
+    "volume): docker compose --profile stream up -d --wait --no-deps ops-db && "
+    "docker compose --profile stream restart iceberg-rest"
+)
 
 
 def sh(*cmd: str) -> None:
@@ -27,6 +40,58 @@ def terraform(*args: str) -> None:
     """Run terraform through Docker so it doesn't need installing locally."""
     infra = os.path.abspath("infra/terraform")
     sh("docker", "run", "--rm", "-v", f"{infra}:/work", "-w", "/work", TF_IMAGE, *args)
+
+
+def compose_cwd_refusal(cwd: str, working_dirs) -> str | None:
+    """None if Compose may run from `cwd`, else why not.
+
+    `working_dirs` are the com.docker.compose.project.working_dir labels of the existing dockwatch containers. Docker
+    Compose compares that path exactly, so a shell that sees the folder with different letter casing (DockWatch vs
+    dockwatch) makes Compose recreate every container it touches. Allowed when there are no containers (CI, a fresh
+    machine) or every container was created from exactly `cwd`.
+    """
+    dirs = sorted({d for d in working_dirs if d})
+    others = [d for d in dirs if d != cwd]
+    if not others:
+        return None
+    return (
+        f"refusing to run: this shell's directory is '{cwd}' but the dockwatch containers were created from "
+        f"'{others[0]}'. Docker Compose treats a different path, even one that differs only in letter case, as another "
+        f"project directory and recreates the containers it touches (path-casing hazard). {CASING_RECOVERY}"
+    )
+
+
+def project_working_dirs() -> list[str]:
+    """working_dir labels of every dockwatch container (empty when Docker is unreachable or there are none)."""
+    try:
+        out = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                "--format",
+                '{{.Label "com.docker.compose.project.working_dir"}}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode:
+        return []
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def refuse_beside_batch(task: str) -> None:
+    """Spark and Connect tasks never start while Trino runs (and batch tasks never beside Spark / Connect)."""
+    up = batch_guard.running_services()
+    reason = batch_guard.refusal(task, lambda s: s in up)
+    if reason:
+        print(reason)
+        sys.exit(1)
 
 
 def stream_running() -> bool:
@@ -49,6 +114,7 @@ def connect_running() -> bool:
 
 def catchup() -> None:
     """Process the Kafka backlog with the same job, image and checkpoints as `stream`, then exit (availableNow)."""
+    refuse_beside_batch("catchup")
     if stream_running():
         print("status-stream is running; stop it first (python tasks.py stream-stop): one Spark JVM at a time.")
         sys.exit(1)
@@ -71,6 +137,7 @@ def catchup() -> None:
 
 def spark_inspect(*args: str) -> None:
     """inspect_tables.py in a single small JVM; `--check` (verify-lake) exits 1 if the lake is not consistent."""
+    refuse_beside_batch("verify-lake" if "--check" in args else "inspect")
     sh(
         "docker",
         "compose",
@@ -106,7 +173,10 @@ TASKS = {
     "produce": lambda *a: uv("python", "-m", "dockwatch.producer", "run", *a),
     "produce-once": lambda *a: uv("python", "-m", "dockwatch.producer", "once", *a),
     "replay": lambda *a: uv("python", "-m", "dockwatch.producer", "replay", *a),
-    "stream": lambda *a: sh("docker", "compose", "--profile", "spark", "up", "-d", "status-stream", *a),
+    "stream": lambda *a: (
+        refuse_beside_batch("stream"),
+        sh("docker", "compose", "--profile", "spark", "up", "-d", "status-stream", *a),
+    ),
     "stream-logs": lambda *a: sh("docker", "compose", "logs", "--tail", "60", "status-stream", *a),
     "stream-stop": lambda *a: sh("docker", "compose", "--profile", "spark", "stop", "status-stream"),
     "test-spark": lambda *a: sh(
@@ -136,24 +206,27 @@ TASKS = {
         "/opt/dockwatch/tests/spark",
         *a,
     ),
-    "sql": lambda *a: sh(
-        "docker",
-        "compose",
-        "--profile",
-        "spark",
-        "run",
-        "--rm",
-        "--no-deps",
-        "status-stream",
-        "/opt/spark/bin/spark-submit",
-        "--master",
-        "local[1]",
-        "--driver-memory",
-        "768m",
-        "--conf",
-        "spark.sql.codegen.wholeStage=false",
-        "/opt/dockwatch/src/dockwatch/streaming/sql.py",
-        *a,
+    "sql": lambda *a: (
+        refuse_beside_batch("sql")
+        or sh(
+            "docker",
+            "compose",
+            "--profile",
+            "spark",
+            "run",
+            "--rm",
+            "--no-deps",
+            "status-stream",
+            "/opt/spark/bin/spark-submit",
+            "--master",
+            "local[1]",
+            "--driver-memory",
+            "768m",
+            "--conf",
+            "spark.sql.codegen.wholeStage=false",
+            "/opt/dockwatch/src/dockwatch/streaming/sql.py",
+            *a,
+        )
     ),
     "inspect": lambda *a: spark_inspect(),
     "verify-lake": lambda *a: spark_inspect("--check", *a),
@@ -174,6 +247,15 @@ TASKS = {
     "cdc-catchup": lambda *a: uv("python", "-m", "dockwatch.cdc", "catchup", *a),
     "cdc-verify": lambda *a: uv("python", "-m", "dockwatch.cdc", "verify", *a),
     "cdc-e2e": lambda *a: uv("python", "-m", "dockwatch.cdc", "e2e", *a),
+    # M4a batch: Trino + Airflow (profile batch, on demand; dockwatch/batch). Never beside Spark or Connect.
+    "batch-up": lambda *a: uv("python", "-m", "dockwatch.batch", "batch-up", *a),
+    "batch-stop": lambda *a: uv("python", "-m", "dockwatch.batch", "batch-stop", *a),
+    "airflow": lambda *a: uv("python", "-m", "dockwatch.batch", "airflow", *a),
+    "dag-test": lambda *a: uv("python", "-m", "dockwatch.batch", "dag-test", *a),
+    "test-airflow": lambda *a: uv("python", "-m", "dockwatch.batch", "test-airflow", *a),
+    "scheduler-up": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-up", *a),
+    "scheduler-stop": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-stop", *a),
+    "trino-sql": lambda *a: uv("python", "-m", "dockwatch.batch", "trino-sql", *a),
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),
     "tf-fmt-check": lambda *a: terraform("fmt", "-check", "-recursive", "-diff"),
@@ -184,6 +266,10 @@ def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in TASKS:
         print(__doc__)
         print("tasks:", ", ".join(TASKS))
+        sys.exit(1)
+    reason = compose_cwd_refusal(os.getcwd(), project_working_dirs())
+    if reason:
+        print(reason)
         sys.exit(1)
     TASKS[sys.argv[1]](*sys.argv[2:])
 

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     cdc_namespace: str = "ops"
     cdc_topic_pattern: str = r"ops\.public\..*"
 
+    # Batch (M4a): Trino's host port (compose `trino`); the Airflow containers set http://trino:8080, and the ops-db /
+    # Connect URLs above to their in-network names. Alert SNS topic: empty = alerts only go to data/airflow/alerts.jsonl
+    trino_url: str = "http://localhost:18080"
+    alerts_topic_arn: str = ""
+
     # Exporter (M2): JSON files the static site reads
     export_dir: str = "web/data"
     export_interval_s: int = 60
