@@ -10,7 +10,14 @@ from collections.abc import Callable
 PROJECT = "dockwatch"
 
 # Batch work (Trino, the Airflow scheduler): refused while a Spark JVM or Kafka Connect runs.
-TRINO_TASKS = ("batch-up", "scheduler-up", "iceberg_maintenance", "partition_evolution_demo")
+TRINO_TASKS = (
+    "batch-up",
+    "scheduler-up",
+    "iceberg_maintenance",
+    "partition_evolution_demo",
+    "trip_history_monthly",
+    "marts_daily",
+)
 TRINO_BLOCKERS = ("status-stream", "cdc-apply", "connect")
 # Spark and Connect work: refused while Trino runs.
 SPARK_CONNECT_TASKS = (

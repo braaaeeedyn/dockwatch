@@ -1132,3 +1132,227 @@ required before `test-airflow`, `batch-up` (Trino) and the keepalive (Connect + 
   `airflow-cli` 296 MiB. `batch-stop` → `catchup` → `verify-lake` → `check_g.py after`: ok.
 - Keepalive (`catch_up_above_mb=16` after a 77.8 MiB probe): retained 81,579,280 B → 56 B with two touches, Connect up
   45.4 s, `dag-test` 61 s.
+
+## 2026-10-12 · M4b · spike stopped: the `raw` Hive catalog runs Trino out of Metaspace on the first INSERT
+
+Loop I's plan starts M4b with a spike of decision 1: load each trip month's CSV through a `raw` Hive catalog (file
+metastore on SeaweedFS) and `INSERT … SELECT` it into `lake.bronze.trips`. The spike failed, so M4b stopped there,
+as the plan says. Nothing in the running stack changed.
+
+**What worked:**
+- **Bucket listing:** one page, 106 keys. The month keys are found by their `YYYYMM-` prefix (`202609-lyftbikes-…`,
+  `202503-…tripdata.zip`, `201901-fordgobike-…csv.zip`). 2020-04 is absent.
+- **Staging:** the ZIP's one CSV member was streamed into `.csv.gz` and counted with `csv`. 2019-01 (legacy, 14 header
+  columns with `bike_share_for_all_trip`) has 192,082 records and stages as 6.3 MB of gz in 2.1 s. 2026-09 (ride,
+  quoted, CRLF) has 607,780 records and stages as 22.8 MB in 6.2 s. Both went to `raw/trips/month=YYYY-MM/`.
+- **The Hive file metastore on SeaweedFS** (`hive.metastore.catalog.dir=s3://dockwatch/hive-metastore/`):
+  `CREATE SCHEMA raw.trips_staging` and the external CSV tables (`skip_header_line_count=1`) worked.
+  - `count(*)` = 192,082 and 607,780, equal to Python's counts.
+  - Every start and end time parsed as `timestamp(6)`, and no `\r` was left in the last column (`member_casual` is
+    exactly `member` / `casual`).
+  - `with_timezone()` moves a spring-forward gap time forward (02:30 → 03:30 PDT) instead of failing.
+
+**What failed:**
+- The first `INSERT INTO lake.bronze.trips SELECT … FROM raw.trips_staging.trips_2026_09` killed Trino twice:
+  `Terminating due to java.lang.OutOfMemoryError: Metaspace`, exit 3, not a container OOM.
+- Container memory peaked at only 1.24 GiB of 2 GiB. `jvm.config` caps Metaspace at `-XX:MaxMetaspaceSize=192M`.
+- Metaspace measured with `jcmd 1 VM.metaspace`:
+
+  | Trino state | Metaspace used |
+  |---|---|
+  | idle, `lake` only | 131 MB |
+  | after one `lake` query | 147 MB |
+  | idle with `raw` | 143 MB |
+  | after DDL on both catalogs | 169 MB |
+  | during the INSERT | 143 → 174 → 192 MB, then the OOM |
+
+  Two connector plugins in one query (the Hive reader plus the Iceberg writer) and the generated code do not fit
+  under 192 MB.
+- The plan freezes `jvm.config` and says to stop on an OOM. The fallback (a local metastore dir) would not help,
+  because the metastore was not the problem. So the engine choice goes back to the Architect.
+
+**Left in place:** `src/dockwatch/batch/trips.py` (the listing, key, status, download-cache, stage and SQL builders)
+and `marts.py` (the SQL literal helper). Nothing imports them yet.
+- `infra/trino/etc/catalog/raw.properties` was removed again. With it, every Trino run, `iceberg_maintenance`
+  included, would start 12 MB closer to the Metaspace cap.
+- The spike's tables were dropped (`lake.bronze.trips`, `lake.metrics.trip_loads` and `raw.trips_staging`). The two
+  cached ZIPs stay in `data/trips/zips/`, and the two gz files stay under `raw/trips/` in SeaweedFS.
+
+## 2026-10-12 · M4b · trips through pyiceberg work; Trino Metaspace runs out in the marts after M4a maintenance
+
+Loop J re-planned M4b after Loop I's stop: the trip load moves out of Trino into pyiceberg, and Trino stays
+Iceberg-only. Iteration 1 built the whole M4b path and ran it in the Checker's order. It stopped on a Trino
+`OutOfMemoryError: Metaspace` in the `marts_daily` dbt build, which the plan says needs the user.
+
+**Why pyiceberg (the five options):**
+- **A raw Hive catalog** + `INSERT … SELECT`: Metaspace OOM in Loop I, twice.
+- **Raise `MaxMetaspaceSize`:** `jvm.config` is frozen, and Trino already peaks near its 2 GiB limit in maintenance.
+- **`add_files`:** in the Trino 483 Iceberg plugin jar, `IcebergMetadata` refuses unless
+  `iceberg.add-files-procedure.enabled=true` (a frozen `lake.properties` change), and `MigrationUtils.addFiles`
+  refuses partitioned tables; `bronze.trips` is `identity(trip_month)`.
+- **Spark from Airflow:** excluded by M4a decision 1 (Spark and Trino never run together).
+- **Batched `INSERT … VALUES`:** about 100 commits per month and large generated plans (Metaspace again).
+- **pyiceberg 0.11.1** with pyarrow 22.0.0 is already in `dockwatch-airflow:2.11.2` (pinned by Airflow's
+  constraints), so there is no new dependency. Python streams the CSV, Trino's JVM does no write work for trips, and
+  each month is one Iceberg commit. The cost is a third writer next to Spark and Trino, for `bronze.trips` and
+  `bronze.station_information` only.
+
+**The load (`trips.load_month`, task `load` of `trip_history_monthly`):**
+- The ZIP's one CSV member is read as a stream (`csv.reader`, `utf-8-sig`), and `map_row` maps every record. `local_time`
+  reads the text as America/Los_Angeles with `fold=0`, so an ambiguous 01:30 is the first (PDT) one and the
+  non-existent 02:30 lands on 10:30Z. A time that does not parse counts as a bad timestamp.
+- **The transaction fallback is taken:** one `tbl.transaction()` deletes the month and appends 100k-row Arrow tables
+  (25k Python rows at a time). It is still one catalog commit. With the whole month in one table (`overwrite`),
+  `airflow-cli` peaked at 1,021 MiB of its 1 GiB during the backfill. Batched, it peaks at 727 MiB, and a single
+  2026-09 load reaches 415 MiB RSS (from 569 MiB).
+- Bad timestamps raise before the commit. `loaded_rows` is Trino's `count(*)` of the month after the commit. One
+  `trip_loads` row (ok / error / missing) goes through Trino.
+- **SeaweedFS needed one setting:** pyarrow's AWS SDK uploads `aws-chunked` with a trailing CRC64 checksum, and
+  SeaweedFS stores the chunk framing inside the object (`730\r\nObj…`), so Trino read "Not an Avro data file".
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` / `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` in the
+  `x-airflow` environment fix it. The first spike table's broken files are orphans under
+  `warehouse/bronze/trips-c13d9cb6…/`. Loop I's `hive-metastore/` and `raw/trips/` gz objects are still in SeaweedFS,
+  but nothing reads them.
+
+**Measured:**
+- **Spike:** 2019-01 (legacy) 192,082 rows in 5.1 s; 2026-09 (ride) 607,780 rows in 11.2 s, and the same after a
+  rerun. 0 bad timestamps, `bike_id` / `ride_id` filled per schema.
+- **`dag-test trip_history_monthly month=2019-01`:** 23 s, `check_i trips 2019-01 legacy` ok.
+- **12-month backfill** (`dags backfill -s 2025-10-01 -e 2026-09-01`): 5,789,432 rows. It took 3 min 33 s and,
+  with the final loader, 3 min 18 s. Each month took 5–10 s. `check_i backfill` ok.
+  - Airflow's backfill runner logged two `DeadlockDetected` errors on `dag_run` and carried on.
+- **Rerun 2026-09:** `check_i rerun` ok (7 data files for the month).
+- **dbt:** dbt-core 1.10.23 + dbt-trino 1.10.6 in `/opt/dbt-venv` (58 exact pins). `dbt debug` connects, and so
+  does `dbt parse`. On a Trino without M4a maintenance before it, `dbt build` passes (3 marts, 28 tests: 645 / 3,860
+  / 15,459 rows). The weekday trip peaks are hours 17, 18, 16 and 8 (Pacific), so the local time-zone reading holds.
+- **Trino Metaspace** (`jstat -gc 1`, used / committed MiB, cap 192):
+
+  | Step | Spike Trino | Checker-order Trino |
+  |---|---|---|
+  | fresh | 113.5 / 115.9 | 114.5 / 116.8 |
+  | after DDL / `iceberg_maintenance` | 141.8 / 144.9 | 175.4 / 179.1 |
+  | after `partition_evolution_demo` | – | 183.3 / 187.8 |
+  | after the trip loads (2 months / legacy + backfill + rerun) | 162.0 / 165.5 | 185.6 / 191.6 |
+  | after one mart CTAS | 173.0 / 177.3 | – |
+  | after `dbt build` (31 nodes) | 178.3 / 183.2 (+1.5 per rebuild) | **OOM**, exit 3 |
+
+  A full GC (`jcmd 1 GC.run`) frees 0.06 MiB: the generated classes stay referenced. The trips path itself adds
+  almost nothing once Trino has seen the tables. The dbt build's new SQL is what crosses 192 MiB after maintenance.
+- **Container peaks:** Trino 1,946 MiB of 2 GiB during the backfill (after maintenance), so above the 1.85 GiB
+  record line. `airflow-cli` 757 MiB in a 2026-09 `dag-test`.
+
+**Other changes:**
+- `dag-test` refuses while another `airflow-cli` container runs. That is the concurrent-run guard: a `dag-test`
+  fails stale running runs, which would include a live backfill.
+- `ensure_image()` rebuilds when the hash of the Dockerfile + `dbt-requirements.txt` differs from the image label
+  `dockwatch.build-hash`.
+- The station dimension (`marts_daily.stations`) is written with one pyiceberg `overwrite` from the newest GBFS
+  `station_information` snapshot: 645 stations.
+- The quality gate (`data/dbt/quality_gate.json`) checks dbt results, mart rows and freshness. Great Expectations
+  waits for M5. The insights export writes `web/data/insights/*.json` atomically, with the manifest last.
+
+**`accept-alerts-stable` (Loop I's stop):** this was environmental. The trace shows `css/base.css` failing with
+`net::ERR_NO_BUFFER_SPACE` (Windows `WSAENOBUFS`, socket exhaustion on the host). No web or test change was made.
+
+**Open:**
+- **Metaspace (user decision):** raise `-XX:MaxMetaspaceSize`, or restart Trino between M4a maintenance and M4b.
+- `accept-i-guard` cannot pass as written. `DAG_IDS` with five names is 122 characters, so it needs
+  `# noqa: E501  # fmt: skip` to keep `ruff` / `ruff format` green. `check_i.py`'s regex wants the line to end in `}`.
+
+## 2026-10-13 · M4b · done: Metaspace raised to 256M, the full batch run passes on one Trino
+
+M4b is done. The 12-month backfill runs green, the marts build and pass their tests, and `marts_daily` writes
+`web/data/insights/*.json`. Two changes made the full run pass: the user raised Trino's Metaspace cap, and the
+insights export now rounds its floats.
+
+**Iteration 1's OOM, both runs:**
+- **Builder's run:** Trino died with `Terminating due to java.lang.OutOfMemoryError: Metaspace` (exit 3,
+  `OOMKilled=false`) in the `marts_daily` dbt build. Before that it had run `iceberg_maintenance`,
+  `partition_evolution_demo` and all the trip loads in one JVM.
+- **Checker's run:** the same error one step earlier, in the backfill's 2026-08 load. That JVM had run maintenance,
+  evolution, 2019-01 and 10 backfill months.
+- In both runs Metaspace hit the 192 MiB cap. The container was not OOM-killed. Measured with `jstat -gc 1`:
+  - fresh: 114.5 MiB;
+  - after maintenance: 175.4 MiB;
+  - after evolution: 183.3 MiB;
+  - the trip loads: about +2 MiB;
+  - one full dbt build on a fresh JVM: about +65 MiB;
+  - each further build: about +1.5 MiB, which a full GC does not free.
+- The Trino container peaked at 1,993 of its 2,048 MiB.
+
+**User decision: `-XX:MaxMetaspaceSize=192M` → `256M`.** This is one line in `infra/trino/etc/jvm.config`, and it is
+the only Trino change. `mem_limit: 2g`, the heap (1G), the code cache and the catalog files are unchanged.
+- **The risk the user accepted:** Metaspace is native memory, and it counts toward the 2 GiB container limit. So
+  64 MiB more Metaspace can turn a Metaspace OOM into a container OOM kill.
+- Decision 1 (pyiceberg writes trips, Trino stays Iceberg-only) stands. The raise is headroom for M4a + M4b in one
+  JVM, not a reason to bring back the Hive `raw` catalog.
+
+**Check fix (not a loosening): `DAG_IDS`.** The five-id `DAG_IDS` line in `tests/airflow/test_dags.py` is 122
+characters, so it needs `# noqa: E501  # fmt: skip` for `ruff` and `ruff format`.
+- `check_i.py guard`'s regex now allows an optional trailing comment after whitespace.
+- It still parses the set and requires exactly the five ids, and the "only this line changed" rule is unchanged.
+- The same guard now pins `jvm.config` to the 0fbb659 file, with only the Metaspace line changed, to exactly 256M.
+
+**The full run (Checker order, one Trino JVM, no restart between steps):**
+
+| Step | Metaspace used / committed MiB (cap 256) | Trino container peak (docker stats MiB) |
+|---|---|---|
+| `batch-up` (fresh) | 141.4 / 144.5 | – |
+| `iceberg_maintenance` | 180.3 / 184.4 | 1,876 after the step |
+| `partition_evolution_demo` | 186.8 / 191.5 | 1,918 |
+| trips 2019-01 (legacy) | 187.3 / 192.1 | 1,799 |
+| 12-month backfill | 188.1 / 192.9 | 1,860 |
+| rerun 2026-09 | 188.5 / 193.4 | 1,876 |
+| `marts_daily` (3 builds, see below) | 192.4 / 197.6 | 2,013 |
+
+- `check_i metaspace` after the marts reported `max_mib` 256.0, 197.6 MiB committed and 58.4 MiB headroom. That is
+  below the 224 MiB line.
+- The run committed more than 192 MiB from the backfill on, so the old cap would have failed there again.
+- The container came close to its limit:
+  - The `marts_daily` dag-test recorded 1,979 MiB for Trino, and the 4-second sampler saw 2,013 MiB. Both are above
+    the 1,894 MiB (1.85 GiB) record line.
+  - The cgroup (v1) `max_usage_in_bytes` reached the full 2,048 MiB with `failcnt` > 0, but that number includes
+    page cache, which the kernel reclaims. RSS peaked at 1,838 MiB.
+  - `oom_kill` stayed 0 and `OOMKilled=false`.
+- **Peak hours.** The weekday trip peak hours (Pacific) are 17, 18 and 8. That confirms the time zone assumption:
+  trip times are local.
+
+**Trips:**
+- **2019-01 (legacy):** 192,082 rows in 6.1 s.
+- **Backfill:** `dags backfill -s 2025-10-01 -e 2026-09-01` loaded **5,789,432 rows**.
+  - Load time was 131 s, and the wall time 257 s.
+  - Each month loaded in 7–15 s.
+  - `airflow-cli` peaked at 725 MiB.
+- **Rerun 2026-09:** 607,780 rows again, with `airflow-cli` at 591 MiB.
+- **`trip_loads`:** these rows match the live counts.
+- **`bronze.trips`:** 64 files, 230 MB, 5,981,514 rows (13 months).
+- **Station codes:** 99.3 % of the trips with a code match a current station (5,057,855 of 5,092,655).
+
+**Marts and insights:**
+- **First `marts_daily`:** `dbt_build` and the quality gate passed, but `export` failed:
+  `trips_vs_availability.json would be 2313972 bytes > 2000000`.
+  - `mart_trips_vs_availability` has 15,461 rows (645 stations × 24 hours).
+  - Every double went out at full precision, for example `0.34794520547945207`.
+- **Fix:** `marts.plain` rounds floats and decimals to 3 digits (`FLOAT_DIGITS`). The marts themselves keep full
+  precision.
+  - With 4 digits the file was 1,917,862 bytes, and it would reach 2,001,342 bytes once every share has 4 digits.
+  - With 3 digits it is 1,886,673 bytes, and at most about 1.94 MB.
+  - The size check is unchanged.
+- **dbt:** the build takes 7.3 s, with 3 models and 28 tests. Mart rows: 3,860 / 645 / 15,461.
+- **Insights files:**
+  - `station_availability_daily.json` 654,995 B;
+  - `rebalancing_need.json` 79,846 B;
+  - `trips_vs_availability.json` 1,886,673 B (over 1 MB; noted for F4);
+  - `manifest.json` 698 B.
+- **The daily file will outgrow the budget.** It holds the newest 30 service dates and now covers 6 of them (about
+  107 KB per day), so at 30 dates it would be about 3.2 MB and `export` would fail. That is a Known gap in
+  CURRENT_STATE. Fixing it means changing the file's shape (for example, the station names in one place), and that
+  is a design decision for F4.
+- The three `marts_daily` builds in this run each added about 1–3 MiB of Metaspace (191.1 → 191.7 → 192.4 used).
+
+**Kept from iteration 1:**
+- The SeaweedFS checksum env fix (`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`).
+- The transaction fallback for the month load.
+- The concurrent-run refusal in `dag-test`.
+- **Leftovers:** the orphan files of the first broken `bronze.trips`, plus Loop I's `hive-metastore/` and
+  `raw/trips/` objects, are still in SeaweedFS. Nothing reads them.

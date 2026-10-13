@@ -218,16 +218,20 @@ operations every time; `data/cdc/e2e-report.json`.)*
 ### M4 · Batch, history and orchestration · Airflow (weeks 5–6)
 - [x] Airflow 2.x in the `batch` profile (LocalExecutor, Postgres metadata DB shared with nothing else). *(M4a:
       Airflow 2.11.2, its own `airflow-db`, plus Trino 483 as the batch SQL engine.)*
-- [ ] DAG `trip_history_monthly`: download a month's trip ZIP, validate columns, load to `bronze.trips`;
+- [x] DAG `trip_history_monthly`: download a month's trip ZIP, validate columns, load to `bronze.trips`;
       `catchup=True` so `airflow dags backfill -s 2019-01-01 -e ...` loads history. Handles the older and newer
-      trip-file schemas (the column names changed over the years).
+      trip-file schemas (the column names changed over the years). *(M4b: pyiceberg writes each month in one
+      commit; the 12-month backfill 2025-10 to 2026-09 loaded 5,789,432 rows, plus legacy 2019-01.)*
 - [x] DAG `iceberg_maintenance` (daily): `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`; logs
       file counts and sizes before/after into `metrics.maintenance_runs`. *(M4a: through Trino's `optimize`, on the
       four streaming and five `ops.*` tables.)*
-- [ ] dbt project (`dbt-trino` locally, `dbt-athena` on aws, one project with two targets):
+- [x] dbt project (`dbt-trino` locally, `dbt-athena` on aws, one project with two targets):
       `mart_station_availability_daily`, `mart_rebalancing_need`, `mart_trips_vs_availability`, plus staging models
-      and tests (`unique`, `not_null`, `accepted_values` for state, relationships to stations).
-- [ ] DAG `marts_daily`: dbt build → Great Expectations checkpoint → **only then** export `web/data/insights/*.json`.
+      and tests (`unique`, `not_null`, `accepted_values` for state, relationships to stations). *(M4b: dbt-core
+      1.10.23 + dbt-trino 1.10.6 in `/opt/dbt-venv`; 28 tests; the `aws` target is declared, not run.)*
+- [x] DAG `marts_daily`: dbt build → Great Expectations checkpoint → **only then** export `web/data/insights/*.json`.
+      *(M4b: the checkpoint is a quality gate on dbt's `run_results.json`, mart rows and freshness; Great
+      Expectations suites join it in M5.)*
 - [x] Retries with exponential backoff, SLA misses and task failures alert (email/SNS on aws, log locally).
       *(M4a: one shared `default_args`; alerts to `data/airflow/alerts.jsonl`, SNS when a topic is set.)*
 
@@ -247,6 +251,17 @@ path-casing guard. **M4b** (next): `trip_history_monthly`, the dbt project on th
 | `verify-lake` freshness ignores `replace` (compaction) snapshots. | A maintenance commit must not make a stopped stream look fresh. |
 | Partition evolution is shown on a lab copy (`lab.status_partition_evolution`); production stays `day()`. | Hourly partitions multiply streaming small files; the demo measures the cost first. |
 | Kafka topics `ops.public.*` keep `cleanup.policy=delete`, `retention.ms=-1`. | Compaction needs tombstones (off) and would break per-op CDC counts; revisit past ~1 GB or ~1M events. |
+
+| M4b decision | Why |
+|---|---|
+| Trip months are written by **pyiceberg** in `airflow-cli` (stream the CSV, map in Python, one transaction per month: delete the month + append Arrow batches); Trino only creates the tables, counts the month back and records `metrics.trip_loads`. | A `raw` Hive catalog ran Trino out of Metaspace; `add_files` is disabled in this catalog and refuses partitioned tables; Spark never runs beside Trino; batched `INSERT … VALUES` means ~100 commits a month. pyiceberg 0.11.1 was already in the Airflow image. |
+| Trip times are read as America/Los_Angeles (`fold=0` for DST). | The weekday peak hours come out at 17, 18 and 8 Pacific. |
+| One delete + append commit per month. | A rerun or backfill replaces the month; readers never see it empty or doubled. |
+| `MaxMetaspaceSize` 192M → **256M** in Trino's `jvm.config` (user decision; `mem_limit` stays 2g). | M4a maintenance + M4b in one JVM reached the 192 MiB cap; 197.6 MiB committed after the marts. Metaspace is native memory inside the 2 GiB container. |
+| dbt-core 1.10.23 + dbt-trino 1.10.6 in a separate venv (`/opt/dbt-venv`); staging models are ephemeral; no `dbt deps`. | dbt needs `protobuf>=6` and Airflow 2.11.2's constraints pin 5.29; Trino views on this REST catalog are unproven; no network at run time. |
+| The quality gate reads `run_results.json`; Great Expectations waits for M5. | M5 owns the GE suites; the gate already blocks the export on any failed test, an empty mart or stale data. |
+| Insights files round floats to 3 digits and must stay ≤ 2,000,000 bytes. | Full doubles put `trips_vs_availability.json` at 2.3 MB. |
+| `dag-test` refuses while another `airflow-cli` runs; the Airflow image rebuilds when its build inputs change. | A `dag-test` fails stale runs, which would include a live backfill; a stale image would run without the dbt venv. |
 
 ### M5 · Quality, lineage, observability (week 7)
 - [ ] Great Expectations suites: schema; ranges (`num_bikes_available ≥ 0`, `bikes + docks ≤ capacity` with a

@@ -1,0 +1,52 @@
+version: 2
+
+models:
+  - name: mart_station_availability_daily
+    description: Share of each Pacific day a current station was empty / full (silver.availability_5m)
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('bronze', 'station_information')
+                field: station_id
+      - name: service_date
+        data_tests: [not_null]
+      - name: share_empty
+        data_tests: [not_null]
+      - name: share_full
+        data_tests: [not_null]
+
+  - name: mart_rebalancing_need
+    description: Stations ranked by hours empty + full over the newest need_days Pacific days
+    columns:
+      - name: station_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: source('bronze', 'station_information')
+                field: station_id
+      - name: hours_empty
+        data_tests: [not_null]
+      - name: hours_full
+        data_tests: [not_null]
+      - name: need_rank
+        data_tests: [not_null]
+
+  - name: mart_trips_vs_availability
+    description: Station x hour-of-day profile of trips per day (trip history) against empty / full shares (live)
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('bronze', 'station_information')
+                field: station_id
+      - name: hour_of_day
+        data_tests: [not_null]
+      - name: trips_started_per_day
+        data_tests: [not_null]

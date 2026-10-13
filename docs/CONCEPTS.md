@@ -323,3 +323,45 @@ one candidate at a time. So `cdc_slot_keepalive` makes the change itself: once t
 `updated_at` and waits for the confirm; if the first confirm only consumed an old candidate and the slot still pins
 the backlog, it touches the row once more. The price is visible in the data: each catch-up adds one or two `u`
 events on `ops.public.vans` and a newer `updated_at` on one van.
+
+## dbt, marts and backfills (M4b)
+
+**dbt.** dbt (data build tool) turns SQL `SELECT` statements into tables. Each model is one `.sql` file, and dbt works
+out the order from the `ref()` and `source()` calls inside them. `dbt build` creates every model and runs every test,
+in dependency order. DockWatch runs dbt-core with the `dbt-trino` adapter, so the SQL runs on Trino against the
+Iceberg catalog. On AWS the same project would use `dbt-athena`.
+
+**Source.** A *source* is a table that dbt reads but does not build, such as `silver.availability_5m` (written by
+Spark) or `bronze.trips` (written by the trip loader). Declaring sources in YAML lets models say
+`source('silver', 'availability_5m')` instead of hard-coding names, and lets tests run on the raw inputs too.
+
+**Ephemeral model.** A staging model cleans and renames one source (`stg_trips` adds the Pacific start hour, for
+example). DockWatch makes them *ephemeral*: dbt inlines them as a CTE into each model that uses them, and nothing is
+created in Trino. That keeps the warehouse to the tables people read.
+
+**Mart.** A mart is a table shaped for one question, at one stated grain (one row per station and day, per station,
+or per station and hour). The three DockWatch marts answer "how often is each station empty or full", "where is
+rebalancing most needed" and "do busy trip hours match the hours a station is empty". The website's insights files
+are exported from them.
+
+**dbt test.** A dbt test is a query that returns the rows that break a rule; zero rows means it passed. Generic tests
+(`not_null`, `unique`, `accepted_values`, `relationships`) are declared in YAML, and singular tests are hand-written
+SQL (for example, that no share is outside 0 to 1). `marts_daily` reads dbt's `run_results.json`, and its quality gate
+refuses to export if any test failed.
+
+**Backfill and data interval.** Every scheduled run covers a *data interval*. For the `@monthly`
+`trip_history_monthly`, the run whose interval starts on 2026-09-01 loads September 2026. A *backfill* creates runs
+for past intervals on purpose: `airflow dags backfill -s 2025-10-01 -e 2026-09-01` makes 12 monthly runs and runs them
+one at a time. The DAG stays paused, so the scheduler never starts the ~90 months since 2019 on its own.
+
+**Idempotent reload.** An idempotent step gives the same result however many times it runs. Each trip month is loaded
+by deleting that month and appending it again in *one* Iceberg commit. So a rerun replaces the month: readers see the
+old rows or the new rows, never both and never none.
+
+**External table.** An external table is a table definition over files that the engine does not own, such as CSV in
+object storage read through a Hive catalog. M4b first tried that for the raw trip CSVs, but Trino ran out of
+Metaspace. Now Python reads the CSV and pyiceberg writes Iceberg directly, so there is no external table.
+
+**Sensor.** A sensor is an Airflow task that waits for a condition instead of doing work. `published` checks the
+Bay Wheels listing until the month's ZIP exists. Lyft publishes around the 5th, while the scheduled run for a month
+fires on the 1st of the next one. In `reschedule` mode the sensor frees its worker slot between checks.

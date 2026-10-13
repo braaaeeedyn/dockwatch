@@ -10,7 +10,11 @@ name: dockwatch
 # Shared by airflow-scheduler / airflow-webserver / airflow-cli (M4a). Metadata lives in airflow-db, never ops-db:
 # an always-writing scheduler there would make WAL the CDC slot dockwatch_ops has to retain.
 x-airflow: &airflow
-  build: infra/airflow
+  build:
+    context: infra/airflow
+    # host.ensure_image() passes the hash of the Dockerfile + dbt-requirements.txt (image label) and rebuilds on change
+    args:
+      DOCKWATCH_BUILD_HASH: ${DOCKWATCH_BUILD_HASH:-unset}
   image: dockwatch-airflow:2.11.2
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -29,10 +33,21 @@ x-airflow: &airflow
     DOCKWATCH_TRINO_URL: http://trino:8080
     DOCKWATCH_CONNECT_URL: http://connect:8083
     DOCKWATCH_ALERTS_TOPIC_ARN: ${DOCKWATCH_ALERTS_TOPIC_ARN:-}
+    # M4b: pyiceberg writes bronze.trips / bronze.station_information data files and reads the GBFS raw archive
+    DOCKWATCH_S3_ENDPOINT: http://s3:8333
+    DOCKWATCH_S3_ACCESS_KEY: ${DOCKWATCH_S3_ACCESS_KEY:-dockwatch}
+    DOCKWATCH_S3_SECRET_KEY: ${DOCKWATCH_S3_SECRET_KEY:-dockwatch-local-only}
+    DOCKWATCH_S3_REGION: ${DOCKWATCH_S3_REGION:-us-west-2}
+    # pyarrow's AWS SDK otherwise uploads aws-chunked with a trailing checksum, which SeaweedFS stores verbatim
+    # (chunk framing inside the Parquet / Avro files; Trino then reads "Not an Avro data file")
+    AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+    AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
   volumes:
     - ./airflow/dags:/opt/airflow/dags:ro
     - ./src:/opt/dockwatch/src:ro
     - ./data:/opt/dockwatch/data
+    - ./dbt:/opt/dockwatch/dbt:ro
+    - ./web/data:/opt/dockwatch/web/data
     # Only to list running containers (memory guard) and docker start / stop the existing `connect` container
     # (cdc_slot_keepalive). Never compose, never creates containers. Root-equivalent on the Docker VM: local only.
     - /var/run/docker.sock:/var/run/docker.sock

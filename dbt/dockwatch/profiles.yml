@@ -1,0 +1,22 @@
+# In the repo on purpose: no secrets, only env_var() lookups. threads: 1 keeps Trino's memory flat.
+dockwatch:
+  target: local
+  outputs:
+    local:
+      type: trino
+      method: none
+      host: "{{ env_var('DOCKWATCH_TRINO_HOST', 'trino') }}"
+      port: 8080
+      http_scheme: http
+      user: dockwatch
+      database: lake
+      schema: marts
+      threads: 1
+    aws:  # M6: Athena on the Glue catalog; declared, not installed or run locally
+      type: athena
+      s3_staging_dir: "{{ env_var('DOCKWATCH_ATHENA_STAGING_DIR', 's3://dockwatch-athena-results/') }}"
+      region_name: "{{ env_var('DOCKWATCH_S3_REGION', 'us-west-2') }}"
+      database: awsdatacatalog
+      schema: marts
+      work_group: "{{ env_var('DOCKWATCH_ATHENA_WORKGROUP', 'primary') }}"
+      threads: 1

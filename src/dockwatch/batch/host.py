@@ -5,6 +5,7 @@ Path.resolve() returns the on-disk `DockWatch` casing, and Compose would recreat
 refuses to run from a different casing). Batch services are always started with --no-deps.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ AIRFLOW_IMAGE = "dockwatch-airflow:2.11.2"
 BATCH_SERVICES = ("trino", "airflow-db", "airflow-scheduler", "airflow-webserver")
 DAG_TEST_TIMEOUT_S = 45 * 60
 DATA = Path("data")
+BUILD_INPUTS = (Path("infra/airflow/Dockerfile"), Path("infra/airflow/dbt-requirements.txt"))
 
 
 class BatchError(RuntimeError):
@@ -58,9 +60,30 @@ def refuse(task: str) -> None:
         raise BatchError(reason)
 
 
+def build_hash() -> str:
+    """Hash of the image's build inputs (line endings normalised, so a Windows checkout hashes like CI's)."""
+    d = hashlib.sha256()
+    for p in BUILD_INPUTS:
+        d.update(p.read_bytes().replace(b"\r\n", b"\n"))
+    return d.hexdigest()[:16]
+
+
+def image_hash() -> str | None:
+    """The image's dockwatch.build-hash label; None when the image is missing."""
+    r = subprocess.run(
+        ["docker", "image", "inspect", "-f", '{{ index .Config.Labels "dockwatch.build-hash" }}', AIRFLOW_IMAGE],
+        capture_output=True,
+        text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def ensure_image() -> None:
-    if subprocess.run(["docker", "image", "inspect", AIRFLOW_IMAGE], capture_output=True).returncode:
-        compose("--profile", "airflow-cli", "build", "airflow-cli", timeout=1800)
+    """Build the Airflow image when it is missing or was built from other inputs (Dockerfile, dbt-requirements.txt)."""
+    want = build_hash()
+    if image_hash() != want:
+        compose("--profile", "airflow-cli", "build", "--build-arg", f"DOCKWATCH_BUILD_HASH={want}", "airflow-cli",
+                timeout=1800)  # fmt: skip
 
 
 def airflow_db_up() -> None:
@@ -111,6 +134,7 @@ def test_airflow(*pytest_args: str) -> None:
         ("src", "src"),
         ("tests", "tests"),
         ("airflow/dags", "airflow/dags"),
+        ("dbt", "dbt"),
         ("pyproject.toml", "pyproject.toml"),
     ):
         mounts += ["-v", f"{os.path.abspath(src)}:/opt/dockwatch/{dst}:ro"]
@@ -190,6 +214,12 @@ def dag_test(dag_id: str, pairs: list[str]) -> dict:
         raise BatchError(f"bad dag id {dag_id!r}")
     conf = parse_conf(pairs)
     refuse(dag_id)
+    if "airflow-cli" in running_services():
+        # dag-test fails stale running runs when no scheduler runs; beside a live dag-test / backfill it would fail them
+        raise BatchError(
+            "another Airflow CLI run (dag-test / dags backfill) is still running in airflow-cli; wait for it, or "
+            "find a leftover one with `docker ps --filter name=airflow-cli` and stop it with `docker stop <name>`"
+        )
     airflow_db_up()
     logical = datetime.now(UTC).replace(microsecond=0).isoformat()
     seen = running_services()

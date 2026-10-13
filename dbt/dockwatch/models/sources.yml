@@ -1,0 +1,52 @@
+version: 2
+
+sources:
+  - name: silver
+    database: lake
+    schema: silver
+    description: Spark streaming output (M2)
+    tables:
+      - name: station_status
+        columns:
+          - name: station_id
+            data_tests: [not_null]
+          - name: state
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: [offline, empty, full, low, high, ok]
+      - name: availability_5m
+        columns:
+          - name: station_id
+            data_tests: [not_null]
+          - name: window_start
+            data_tests: [not_null]
+      - name: station_episodes
+        columns:
+          - name: episode_id
+            data_tests: [not_null]
+
+  - name: bronze
+    database: lake
+    schema: bronze
+    tables:
+      - name: trips
+        description: Bay Wheels trip history, one identity partition per trip_month (trip_history_monthly)
+        columns:
+          - name: trip_month
+            data_tests: [not_null]
+          - name: member_type
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: [member, casual]
+          - name: schema_version
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: [legacy, ride]
+      - name: station_information
+        description: The current GBFS stations (marts_daily.stations, from the raw archive)
+        columns:
+          - name: station_id
+            data_tests: [unique, not_null]

@@ -1,5 +1,6 @@
-"""Task callables for the three M4a DAGs. They run inside the Airflow containers (Airflow, `trino`, `docker` and
-`psycopg` are imported lazily); the rules live in the pure modules (guard, maintenance, evolution, slot, alerts).
+"""Task callables for the three M4a DAGs and the two M4b DAGs. They run inside the Airflow containers (Airflow,
+`trino`, `docker`, `psycopg`, pyarrow and pyiceberg are imported lazily); the rules live in the pure modules (guard,
+maintenance, evolution, slot, alerts, trips, marts).
 
 Guard failures (a Spark JVM or Kafka Connect beside Trino, a lost slot) raise AirflowFailException: no retry, alert.
 """
@@ -8,7 +9,7 @@ import json
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from dockwatch.batch import alerts, evolution, guard, maintenance, slot
+from dockwatch.batch import alerts, evolution, guard, maintenance, marts, slot, trips
 from dockwatch.config import get_settings
 
 PROJECT = "dockwatch"
@@ -297,3 +298,200 @@ def keepalive(**context) -> dict:
             f"safe_wal_size {safe / slot.MIB:.0f} MiB < {p['alert_below_safe_mb']} MiB after catch-up",
         )
     return line
+
+
+# ---------------------------------------------------------------- trip_history_monthly (M4b)
+
+
+def trips_month(context: dict) -> str:
+    """The `month` param (dag-test month=YYYY-MM) if set, else the month of the run's data interval."""
+    try:
+        return trips.month_of(conf_params(context).get("month"), context["data_interval_start"])
+    except trips.TripError as e:
+        fail(str(e))
+
+
+def trips_zips():
+    return alerts.data_dir() / "trips" / "zips"
+
+
+def trips_guard(**context) -> None:
+    trino_guard("trip_history_monthly")
+    print("month:", trips_month(context), flush=True)
+
+
+def trips_published(**context) -> bool:
+    """PythonSensor: True once the month's ZIP is in the bucket. A month that is absent while a later one exists
+    (2020-04) is recorded as `missing` in lake.metrics.trip_loads and skipped; otherwise poke again later."""
+    month = trips_month(context)
+    status = trips.month_status(trips.fetch_listing(), month)
+    print(f"{month}: {status}", flush=True)
+    if status == "missing":
+        from airflow.exceptions import AirflowSkipException
+
+        execute = trino_execute()
+        for sql in trips.create_sql():
+            execute(sql)
+        now = datetime.now(UTC)
+        row = {
+            "run_id": context["dag_run"].run_id,
+            "trip_month": trips.first_day(month),
+            "status": "missing",
+            "error": f"{month} is not in the bucket while later months are",
+            "started_at": now,
+            "finished_at": now,
+        }
+        execute(trips.insert_load_sql(row))  # fmt: skip
+        raise AirflowSkipException(f"{month}: not published (later months are)")
+    return status == "published"
+
+
+def trips_download(**context) -> dict:
+    month = trips_month(context)
+    listing = trips.fetch_listing()
+    key = trips.month_key(listing, month)
+    if not key:
+        fail(f"{month}: no ZIP in the bucket listing")
+    try:
+        path = trips.download(key, listing[key], trips_zips())
+    except trips.TripError as e:
+        fail(str(e))
+    print(f"{month}: {path} ({listing[key]} bytes)", flush=True)
+    return {"month": month, "key": key}
+
+
+def trips_load(**context) -> dict:
+    """Replace the month in bronze.trips (pyiceberg, one commit), count it back, record trip_loads. Bad data
+    (header, timestamps, counts) fails without retry."""
+    got = context["ti"].xcom_pull(task_ids="download")
+    month, key = got["month"], got["key"]
+    try:
+        row = trips.load_month(trino_execute(), context["dag_run"].run_id, month, key, trips_zips() / key)
+    except trips.TripError as e:
+        fail(str(e))
+    out = {k: row.get(k) for k in ("status", "schema_version", "csv_rows", "loaded_rows", "bad_timestamps")}
+    print(json.dumps({"month": month, **out}), flush=True)
+    return out
+
+
+# ---------------------------------------------------------------- marts_daily (M4b)
+
+
+def marts_guard(**context) -> None:
+    trino_guard("marts_daily")
+
+
+def marts_stations(**context) -> dict:
+    """lake.bronze.station_information from the newest GBFS station_information snapshot in the raw archive, replaced
+    with one pyiceberg overwrite (Trino only creates the table and counts it back)."""
+    from dockwatch.producer.archive import build_archive
+
+    archive = build_archive(get_settings())
+    keys = archive.list_keys("raw/gbfs/station_information/")
+    if not keys:
+        fail("no station_information snapshot in raw/gbfs/station_information/")
+    rows = marts.station_rows(json.loads(archive.get(keys[-1])), datetime.now(UTC))
+    if not rows:
+        fail(f"{keys[-1]}: no stations")
+    execute = trino_execute()
+    for sql in marts.create_station_sql():
+        execute(sql)
+    trips.overwrite(marts.STATION_TABLE, trips.rows_table(marts.STATION_COLUMNS, rows))
+    n = int(execute(f"SELECT count(*) AS n FROM {marts.STATION_TABLE}")[0]["n"])
+    if n != len(rows):
+        raise RuntimeError(f"{marts.STATION_TABLE}: {n} rows after the overwrite, wrote {len(rows)}")
+    out = {"source": keys[-1], "stations": n}
+    print(json.dumps(out), flush=True)
+    return out
+
+
+DBT = "/opt/dbt-venv/bin/dbt"
+DBT_PROJECT = "/opt/dockwatch/dbt/dockwatch"
+
+
+def dbt_dir():
+    return alerts.data_dir() / "dbt"
+
+
+def insights_dir():
+    """web/data/insights (/opt/dockwatch/web/data/insights in the Airflow containers)."""
+    return alerts.data_dir().parent / "web" / "data" / "insights"
+
+
+def run_results() -> dict:
+    p = dbt_dir() / "target" / "run_results.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+
+
+def marts_dbt_build(**context) -> dict:
+    """dbt build (models + tests, threads 1). A failed test fails without retry; anything else retries."""
+    import subprocess
+
+    out = dbt_dir()
+    cmd = [DBT, "build", "--project-dir", DBT_PROJECT, "--profiles-dir", DBT_PROJECT, "--target", "local",
+           "--target-path", str(out / "target"), "--log-path", str(out / "logs")]  # fmt: skip
+    print("+", " ".join(cmd), flush=True)
+    code = subprocess.run(cmd, timeout=1800).returncode
+    rr = run_results()
+    bad = [(r.get("unique_id"), r.get("status")) for r in rr.get("results") or [] if r.get("status") in ("fail",)]
+    if bad:
+        fail(f"dbt tests failed: {bad}")
+    if code:
+        raise RuntimeError(f"dbt build exited {code} (see {out / 'logs' / 'dbt.log'})")
+    return {"elapsed_s": rr.get("elapsed_time"), "nodes": len(rr.get("results") or [])}
+
+
+def marts_quality_gate(**context) -> dict:
+    """data/dbt/quality_gate.json from run_results.json, the marts' row counts and freshness against silver."""
+    execute = trino_execute()
+    rows = {m: int(execute(f"SELECT count(*) AS n FROM lake.marts.{m}")[0]["n"]) for m in marts.MARTS}
+    fresh = execute(
+        "SELECT (SELECT max(service_date) FROM lake.marts.mart_station_availability_daily) AS d, "
+        "(SELECT CAST(max(window_start) AT TIME ZONE 'America/Los_Angeles' AS date) FROM lake.silver.availability_5m)"
+        " AS s"
+    )[0]
+    doc = marts.quality_gate(run_results(), rows, fresh["d"], fresh["s"])
+    doc["dag_run_id"] = context["dag_run"].run_id
+    path = dbt_dir() / "quality_gate.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    marts.write_atomic(path, json.dumps(doc, indent=1) + "\n")
+    print(json.dumps(doc, indent=1), flush=True)
+    if not doc["passed"]:
+        fail(f"quality gate failed: {doc['problems']}")
+    return {k: doc[k] for k in ("passed", "tests", "warnings")}
+
+
+def marts_export(**context) -> dict:
+    """web/data/insights/*.json from the marts (only after the gate passed), manifest.json last."""
+    execute = trino_execute()
+    tables = {}
+    for name, (mart, order) in marts.INSIGHTS.items():
+        where = ""
+        if name == "station_availability_daily":
+            where = (f" WHERE service_date > (SELECT max(service_date) FROM lake.marts.{mart}) - INTERVAL "
+                     f"'{marts.DAILY_DATES}' DAY")  # fmt: skip
+        result = execute(f"SELECT * FROM lake.marts.{mart}{where} ORDER BY {order}")
+        cols = list(result[0]) if result else []
+        tables[name] = (cols, [[r[c] for c in cols] for r in result])
+    gate = json.loads((dbt_dir() / "quality_gate.json").read_text(encoding="utf-8"))
+    dcols, daily = tables["station_availability_daily"]
+    days = sorted({r[dcols.index("service_date")] for r in daily})
+    need = execute("SELECT min(window_first_day) AS a, max(window_last_day) AS b FROM lake.marts.mart_rebalancing_need")
+    trips_w = execute("SELECT min(trip_first_month) AS a, max(trip_last_month) AS b FROM "
+                      "lake.marts.mart_trips_vs_availability")  # fmt: skip
+    manifest = {
+        "dag_run_id": context["dag_run"].run_id,
+        "quality_gate": {k: gate.get(k) for k in ("passed", "tests", "warnings")},
+        "windows": {
+            "daily_service_dates": [marts.plain(days[0]), marts.plain(days[-1])] if days else None,
+            "rebalancing_days": [marts.plain(need[0]["a"]), marts.plain(need[0]["b"])],
+            "trip_months": [marts.plain(trips_w[0]["a"]), marts.plain(trips_w[0]["b"])],
+        },
+        "source": "lake.marts (dbt on Trino; silver live data and bronze.trips Bay Wheels trip history)",
+    }
+    try:
+        man = marts.export_insights(insights_dir(), tables, manifest)
+    except marts.GateError as e:
+        fail(str(e))
+    print(json.dumps(man["files"]), flush=True)
+    return man["files"]

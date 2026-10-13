@@ -1,0 +1,22 @@
+# DockWatch marts (M4b). Local: dbt-trino against compose `trino` (catalog lake); aws: dbt-athena (M6, untested).
+# Run through the marts_daily DAG (python tasks.py dag-test marts_daily); ./dbt is mounted read-only, so target/ and
+# logs/ go to data/dbt (--target-path / --log-path).
+name: dockwatch
+version: "1.0.0"
+config-version: 2
+profile: dockwatch
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+vars:
+  need_days: 7        # mart_rebalancing_need: the newest N Pacific days of live data
+  trip_months: 12     # mart_trips_vs_availability: the newest N loaded trip months
+
+models:
+  dockwatch:
+    staging:
+      +materialized: ephemeral   # no Trino views: view support on this Iceberg REST catalog is unproven
+    marts:
+      +materialized: table
+      +on_table_exists: replace  # CREATE OR REPLACE TABLE: one Iceberg commit, readers never see an empty mart

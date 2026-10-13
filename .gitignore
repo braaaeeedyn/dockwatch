@@ -18,6 +18,7 @@ checkpoints/
 spark-warehouse/
 metastore_db/
 web/data/*.json
+web/data/insights/
 
 # Terraform
 .terraform/

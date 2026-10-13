@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; next M4b: trip history, dbt marts). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; next M5: data quality). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -83,10 +83,16 @@ python tasks.py dag-test iceberg_maintenance          # one bounded DAG run -> d
 python tasks.py dag-test partition_evolution_demo     # (key=value pairs become the run conf)
 python tasks.py dag-test cdc_slot_keepalive catch_up_above_mb=16   # starts / stops Connect; touches one van row so the slot advances
 python tasks.py trino-sql "SELECT * FROM lake.metrics.maintenance_runs"
+python tasks.py dag-test trip_history_monthly month=2019-01   # M4b: one trip month into lake.bronze.trips (pyiceberg)
+python tasks.py airflow dags backfill --reset-dagruns -y -s 2025-10-01 -e 2026-09-01 trip_history_monthly   # 12 months, one at a time
+python tasks.py dag-test marts_daily  # dbt build -> quality gate -> web/data/insights/*.json
 python tasks.py batch-stop           # stop Trino and Airflow (volumes kept); always before catchup / stream / CDC tasks
 python tasks.py test-airflow         # DAG tests in the Airflow image (SQLite metadata DB)
 python tasks.py scheduler-up         # the Airflow scheduler, for a smoke test (scheduler-stop stops it)
 ```
+
+`dag-test` refuses while another Airflow CLI run (another `dag-test` or a `dags backfill`) is still going. Keep
+`trip_history_monthly` paused: unpaused with `catchup=True`, the scheduler would load every month since 2019.
 
 Run every task from Git Bash in the folder path the containers were created from: `tasks.py` refuses when the
 path's letter casing differs, because Docker Compose would recreate the stream containers.

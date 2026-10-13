@@ -20,7 +20,7 @@ from airflow.utils.session import create_session  # noqa: E402
 from dockwatch.batch import airflow_defaults, alerts, runstate  # noqa: E402
 
 DAGS_FOLDER = Path(__file__).resolve().parents[2] / "airflow" / "dags"
-DAG_IDS = {"iceberg_maintenance", "partition_evolution_demo", "cdc_slot_keepalive"}
+DAG_IDS = {"iceberg_maintenance", "partition_evolution_demo", "cdc_slot_keepalive", "trip_history_monthly", "marts_daily"}  # noqa: E501  # fmt: skip
 START = datetime(2026, 10, 1, tzinfo=UTC)
 
 
