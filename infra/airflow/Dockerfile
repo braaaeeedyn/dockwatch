@@ -20,10 +20,20 @@ RUN python -m venv /opt/dbt-venv \
     && /opt/dbt-venv/bin/pip install --no-cache-dir --disable-pip-version-check -r /opt/dbt-requirements.txt
 USER airflow
 
+# Loop L: Great Expectations in its own venv too (GE needs SQLAlchemy 2, pandas 3, numpy 2; Airflow's environment has
+# SQLAlchemy 1.4); every package pinned. marts_daily's quality_gate task runs it as a subprocess (dockwatch.batch.gx_run).
+COPY gx-requirements.txt /opt/gx-requirements.txt
+USER root
+RUN python -m venv /opt/gx-venv \
+    && /opt/gx-venv/bin/pip install --no-cache-dir --disable-pip-version-check -r /opt/gx-requirements.txt
+USER airflow
+
 # host.ensure_image() rebuilds when this hash of the Dockerfile + dbt-requirements.txt changes
+# (and gx-requirements.txt since Loop L: host.BUILD_INPUTS)
 ARG DOCKWATCH_BUILD_HASH=unset
 LABEL dockwatch.build-hash=$DOCKWATCH_BUILD_HASH
 
 ENV PYTHONPATH=/opt/dockwatch/src \
     AIRFLOW__OPENLINEAGE__DISABLED=true \
-    DBT_SEND_ANONYMOUS_USAGE_STATS=false
+    DBT_SEND_ANONYMOUS_USAGE_STATS=false \
+    GX_ANALYTICS_ENABLED=False

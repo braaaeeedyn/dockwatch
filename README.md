@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; next: Great Expectations and lineage, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; next: OpenLineage lineage, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -85,7 +85,7 @@ python tasks.py dag-test cdc_slot_keepalive catch_up_above_mb=16   # starts / st
 python tasks.py trino-sql "SELECT * FROM lake.metrics.maintenance_runs"
 python tasks.py dag-test trip_history_monthly month=2019-01   # M4b: one trip month into lake.bronze.trips (pyiceberg)
 python tasks.py airflow dags backfill --reset-dagruns -y -s 2025-10-01 -e 2026-09-01 trip_history_monthly   # 12 months, one at a time
-python tasks.py dag-test marts_daily  # dbt build -> quality gate -> web/data/insights/*.json (read by insights.html)
+python tasks.py dag-test marts_daily  # dbt build -> quality gate (dbt tests + Great Expectations on silver) -> web/data/insights/*.json (insights.html); run it on a fresh Trino (batch-stop, batch-up) after other batch work
 python tasks.py dbt-compile          # compile the dbt project offline (no Trino; also a CI step) -> data/dbt-compile/
 python tasks.py dag-test pipeline_health   # per-minute pipeline metrics -> lake.metrics.pipeline_minutely + web/data/health.json (pipeline.html)
 python tasks.py batch-stop           # stop Trino and Airflow (volumes kept); always before catchup / stream / CDC tasks

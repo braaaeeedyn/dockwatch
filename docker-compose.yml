@@ -12,7 +12,8 @@ name: dockwatch
 x-airflow: &airflow
   build:
     context: infra/airflow
-    # host.ensure_image() passes the hash of the Dockerfile + dbt-requirements.txt (image label) and rebuilds on change
+    # host.ensure_image() passes the hash of the Dockerfile + dbt- / gx-requirements.txt (image label) and rebuilds on
+    # change
     args:
       DOCKWATCH_BUILD_HASH: ${DOCKWATCH_BUILD_HASH:-unset}
   image: dockwatch-airflow:2.11.2

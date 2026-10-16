@@ -9,7 +9,7 @@ import json
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from dockwatch.batch import alerts, evolution, guard, health, maintenance, marts, slot, trips
+from dockwatch.batch import alerts, evolution, expectations, guard, health, maintenance, marts, slot, trips
 from dockwatch.config import get_settings
 
 PROJECT = "dockwatch"
@@ -442,8 +442,20 @@ def marts_dbt_build(**context) -> dict:
     return {"elapsed_s": rr.get("elapsed_time"), "nodes": len(rr.get("results") or [])}
 
 
+GX_PYTHON = "/opt/gx-venv/bin/python"
+
+
+def gx_results_path():
+    """data/quality/expectations.json (written by dockwatch.batch.gx_run in the GE venv)."""
+    return alerts.data_dir() / "quality" / "expectations.json"
+
+
 def marts_quality_gate(**context) -> dict:
-    """data/dbt/quality_gate.json from run_results.json, the marts' row counts and freshness against silver."""
+    """data/dbt/quality_gate.json from run_results.json, the marts' row counts and freshness against silver, plus the
+    Great Expectations checkpoint on the newest 24 h of silver (GE venv subprocess, data/quality/expectations.json).
+    A failed dbt test or blocking expectation fails without retry; a crashed GE run retries."""
+    import subprocess
+
     execute = trino_execute()
     rows = {m: int(execute(f"SELECT count(*) AS n FROM lake.marts.{m}")[0]["n"]) for m in marts.MARTS}
     fresh = execute(
@@ -452,11 +464,23 @@ def marts_quality_gate(**context) -> dict:
         " AS s"
     )[0]
     doc = marts.quality_gate(run_results(), rows, fresh["d"], fresh["s"])
-    doc["dag_run_id"] = context["dag_run"].run_id
+    run_id = context["dag_run"].run_id
+    doc["dag_run_id"] = run_id
+    newest = health.utc(execute(f"SELECT max(snapshot_ts) AS t FROM {expectations.TABLE}")[0]["t"])
+    code, note = 0, "silver has no rows"
+    if newest is not None:
+        cmd = [GX_PYTHON, "-m", "dockwatch.batch.gx_run", "trino", "--run-id", run_id, "--window-end",
+               expectations.iso(newest), "--out", str(gx_results_path())]  # fmt: skip
+        print("+", " ".join(cmd), flush=True)
+        code = subprocess.run(cmd, timeout=900).returncode
+        note = f"gx_run exited {code}" if code else ""
+    doc = expectations.merge_gate(doc, expectations.read_results(gx_results_path()), run_id, note)
     path = dbt_dir() / "quality_gate.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     marts.write_atomic(path, json.dumps(doc, indent=1) + "\n")
     print(json.dumps(doc, indent=1), flush=True)
+    if code:
+        raise RuntimeError(f"Great Expectations run exited {code} (retried)")
     if not doc["passed"]:
         fail(f"quality gate failed: {doc['problems']}")
     return {k: doc[k] for k in ("passed", "tests", "warnings")}
@@ -544,8 +568,8 @@ def health_path():
 
 def health_export(**context) -> dict:
     """web/data/health.json: the window read back from pipeline_minutely, silver's freshness, every existing
-    maintenance table's newest commit / files / partitions, the quality gate and dbt tests, the newest maintenance
-    run."""
+    maintenance table's newest commit / files / partitions, the quality gate, dbt tests and Great Expectations results,
+    the newest maintenance run."""
     execute = trino_execute()
     w0, w1 = health_window(context)
     rows = health.table_rows(execute(health.window_sql(w0, w1)))
@@ -557,6 +581,7 @@ def health_export(**context) -> dict:
     gate = json.loads(gate_path.read_text(encoding="utf-8")) if gate_path.is_file() else None
     doc = health.health_doc(datetime.now(UTC), context["dag_run"].run_id, rows, last, tables, gate,
                             health.dbt_tests(run_results()), run)  # fmt: skip
+    doc["quality"]["expectations"] = expectations.read_results(gx_results_path())  # unchanged, or null
     try:
         size = health.write_health(health_path(), doc)
     except health.HealthError as e:

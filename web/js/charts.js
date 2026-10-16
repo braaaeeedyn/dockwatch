@@ -24,7 +24,19 @@ export function ticks(max, count = 5) {
   return out;
 }
 
-/** Call `draw(width)` now and whenever `box` changes width. */
+/**
+ * Round duration ticks for an axis in seconds, in one unit picked from the axis maximum: seconds below 2 min, minutes
+ * below 2 h, hours above. Returns the tick values (seconds) and their labels' formatter ("30 s", "20 min", "12 h").
+ */
+export function durationTicks(maxS, count = 5) {
+  const [size, unit] = maxS < 120 ? [1, "s"] : maxS < 7200 ? [60, "min"] : [3600, "h"];
+  return {
+    values: ticks(maxS / size, count).map((v) => v * size),
+    format: (v) => `${Number((v / size).toPrecision(12))} ${unit}`,
+  };
+}
+
+/** Call `draw(width)` now, whenever `box` changes width, and once the web fonts have loaded (labels are measured). */
 export function drawOnResize(box, draw) {
   let width = 0;
   const redraw = () => {
@@ -36,6 +48,10 @@ export function drawOnResize(box, draw) {
   };
   redraw();
   if ("ResizeObserver" in window) new ResizeObserver(redraw).observe(box);
+  document.fonts?.ready.then(() => {
+    width = 0;
+    redraw();
+  });
 }
 
 /**
@@ -73,34 +89,49 @@ export function scatter(svg, points, { width, xLabel, yLabel, formatX = String, 
 
 /**
  * Line chart into `svg` over a time axis: `times` (Date[]), `series` [{values, className}] (null = gap),
- * an optional `threshold` {value, label} drawn dashed with its label at the line end. y from 0.
+ * an optional `threshold` {value, label} drawn dashed with its label at the line end. y from 0, with ticks from
+ * `yTicks(max, count)` ({values, format}; default: round numbers labelled by `formatY`). The left margin fits the
+ * widest y label, as measured in the page, beside the rotated y title, so the two never overlap.
  */
-export function lineChart(svg, times, series, { width, yLabel, formatY = String, formatTime, threshold = null }) {
+export function lineChart(svg, times, series, { width, yLabel, formatY = String, formatTime, threshold = null, yTicks = null }) {
   const narrow = width < 600;
   const height = Math.round(Math.min(320, Math.max(220, width * 0.4)));
-  const m = { top: 16, right: 16, bottom: 32, left: 64 };
-  const plotW = width - m.left - m.right;
-  const plotH = height - m.top - m.bottom;
   const values = series.flatMap((s) => s.values).filter((v) => v !== null);
-  const yt = ticks(Math.max(...values, threshold ? threshold.value : 0, 0), narrow ? 3 : 4);
-  const t0 = times[0].getTime();
-  const span = Math.max(1, times[times.length - 1].getTime() - t0);
-  const sx = (t) => m.left + ((t.getTime() - t0) / span) * plotW;
-  const sy = (v) => m.top + plotH - (v / yt[yt.length - 1]) * plotH;
+  const max = Math.max(...values, threshold ? threshold.value : 0, 0);
+  const y = yTicks ? yTicks(max, narrow ? 3 : 4) : { values: ticks(max, narrow ? 3 : 4), format: formatY };
+  const yt = y.values;
 
   svg.replaceChildren();
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("height", String(height));
   const grid = svgEl("g", { class: "chart__grid", "aria-hidden": "true" });
-  for (const v of yt) {
-    grid.append(svgEl("line", { x1: m.left, x2: width - m.right, y1: sy(v), y2: sy(v) }));
-    grid.append(svgEl("text", { x: m.left - 8, y: sy(v), class: "chart__tick", "text-anchor": "end", dy: "0.32em" }, formatY(v)));
-  }
+  svg.append(grid);
+  const labels = yt.map((v) => grid.appendChild(svgEl("text", { class: "chart__tick", "text-anchor": "end", dy: "0.32em" }, y.format(v))));
+  const title = grid.appendChild(svgEl("text", { class: "chart__axis-label", "text-anchor": "middle" }, yLabel));
+  const titleBox = title.getBBox(); // at y = 0: its top is -ascent; once rotated, its line height is its width
+  const titleW = Math.ceil(titleBox.height);
+  const labelW = Math.ceil(Math.max(0, ...labels.map((t) => t.getComputedTextLength())));
+  const m = { top: 16, right: 16, bottom: 32, left: 2 + titleW + 8 + labelW + 8 };
+  const plotW = width - m.left - m.right;
+  const plotH = height - m.top - m.bottom;
+  const t0 = times[0].getTime();
+  const span = Math.max(1, times[times.length - 1].getTime() - t0);
+  const sx = (t) => m.left + ((t.getTime() - t0) / span) * plotW;
+  const sy = (v) => m.top + plotH - (v / yt[yt.length - 1]) * plotH;
+
+  yt.forEach((v, i) => {
+    labels[i].setAttribute("x", String(m.left - 8));
+    labels[i].setAttribute("y", String(sy(v)));
+    grid.insertBefore(svgEl("line", { x1: m.left, x2: width - m.right, y1: sy(v), y2: sy(v) }), labels[0]);
+  });
   const step = narrow ? 8 : 4; // hours between time ticks
   for (let i = 0; i < times.length; i += 60 * step) {
     grid.append(svgEl("text", { x: sx(times[i]), y: height - 10, class: "chart__tick", "text-anchor": "middle" }, formatTime(times[i])));
   }
-  grid.append(svgEl("text", { x: 14, y: m.top + plotH / 2, class: "chart__axis-label", "text-anchor": "middle", transform: `rotate(-90 14 ${m.top + plotH / 2})` }, yLabel));
+  const tx = 2 - titleBox.y; // rotated -90° about its baseline: it spans tx - ascent .. tx + descent = 2 .. 2 + titleW
+  title.setAttribute("x", String(tx));
+  title.setAttribute("y", String(m.top + plotH / 2));
+  title.setAttribute("transform", `rotate(-90 ${tx} ${m.top + plotH / 2})`);
   const lines = svgEl("g", { "aria-hidden": "true" });
   for (const s of series) {
     let d = "";
@@ -121,9 +152,9 @@ export function lineChart(svg, times, series, { width, yLabel, formatY = String,
     });
   }
   if (threshold) {
-    const y = sy(threshold.value);
-    lines.append(svgEl("line", { x1: m.left, x2: width - m.right, y1: y, y2: y, class: "chart__threshold" }));
-    lines.append(svgEl("text", { x: width - m.right, y: y - 6, class: "chart__threshold-label", "text-anchor": "end" }, threshold.label));
+    const ty = sy(threshold.value);
+    lines.append(svgEl("line", { x1: m.left, x2: width - m.right, y1: ty, y2: ty, class: "chart__threshold" }));
+    lines.append(svgEl("text", { x: width - m.right, y: ty - 6, class: "chart__threshold-label", "text-anchor": "end" }, threshold.label));
   }
-  svg.append(grid, lines);
+  svg.append(lines);
 }

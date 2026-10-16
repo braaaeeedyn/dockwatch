@@ -164,7 +164,7 @@
               <li><span class="chart-legend__line chart-legend__line--threshold" aria-hidden="true"></span>5 min SLA</li>
             </ul>
             <div class="chart-box" data-chart-box>
-              <svg class="chart" role="img" aria-label="Latency chart: p50 and p95 seconds per minute with the 5 minute SLA line" xmlns="http://www.w3.org/2000/svg"></svg>
+              <svg class="chart" role="img" aria-label="Latency chart: p50 and p95 latency per minute with the 5 minute SLA line" xmlns="http://www.w3.org/2000/svg"></svg>
               <div class="skeleton chart-skeleton" aria-hidden="true"></div>
             </div>
             <p class="caption" data-caption>Loading…</p>
@@ -206,6 +206,21 @@
               </table>
               <div class="skeleton chart-skeleton chart-skeleton--table" aria-hidden="true"></div>
             </div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="expectations" aria-labelledby="expectations-title" aria-busy="true">
+            <h2 id="expectations-title" class="chart-card__title">Great Expectations on silver</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <div class="table-wrap" tabindex="0" role="region" aria-labelledby="expectations-title" data-expectations-table>
+              <table class="data-table data-table--plain">
+                <caption class="visually-hidden">Every Great Expectations check on the newest 24 hours of silver, the column it checks, its result and what it found</caption>
+                <thead><tr><th scope="col">Check</th><th scope="col">Column</th><th scope="col">Result</th><th scope="col" class="num">Found</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div class="skeleton chart-skeleton chart-skeleton--table" aria-hidden="true"></div>
+            </div>
+            <p class="card-soft" data-expectations-none hidden>No Great Expectations results yet.</p>
             <p class="caption" data-caption>Loading…</p>
           </section>
 

@@ -22,7 +22,11 @@ AIRFLOW_IMAGE = "dockwatch-airflow:2.11.2"
 BATCH_SERVICES = ("trino", "airflow-db", "airflow-scheduler", "airflow-webserver")
 DAG_TEST_TIMEOUT_S = 45 * 60
 DATA = Path("data")
-BUILD_INPUTS = (Path("infra/airflow/Dockerfile"), Path("infra/airflow/dbt-requirements.txt"))
+BUILD_INPUTS = (
+    Path("infra/airflow/Dockerfile"),
+    Path("infra/airflow/dbt-requirements.txt"),
+    Path("infra/airflow/gx-requirements.txt"),
+)
 
 
 class BatchError(RuntimeError):
@@ -79,7 +83,8 @@ def image_hash() -> str | None:
 
 
 def ensure_image() -> None:
-    """Build the Airflow image when it is missing or was built from other inputs (Dockerfile, dbt-requirements.txt)."""
+    """Build the Airflow image when it is missing or was built from other inputs (Dockerfile, dbt-requirements.txt,
+    gx-requirements.txt)."""
     want = build_hash()
     if image_hash() != want:
         compose("--profile", "airflow-cli", "build", "--build-arg", f"DOCKWATCH_BUILD_HASH={want}", "airflow-cli",

@@ -1,9 +1,8 @@
 // Shared helpers for the web tests. UI tests never read the real web/data/*.json (gitignored, changes every
 // minute): every test routes live.json / alerts.json to the fixtures and controls time with page.clock.
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { basename } from "node:path";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 

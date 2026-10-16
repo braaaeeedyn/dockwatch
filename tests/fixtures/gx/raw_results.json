@@ -1,0 +1,223 @@
+[
+ {
+  "type": "expect_table_row_count_to_be_between",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "min_value": 1
+  },
+  "success": true,
+  "result": {
+   "observed_value": 382143
+  }
+ },
+ {
+  "type": "expect_table_columns_to_match_set",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column_set": [
+    "station_id",
+    "snapshot_ts",
+    "last_reported_ts",
+    "num_bikes_available",
+    "num_bikes_disabled",
+    "num_ebikes_available",
+    "num_docks_available",
+    "num_docks_disabled",
+    "capacity",
+    "is_installed",
+    "is_renting",
+    "is_returning",
+    "state",
+    "fetched_ts",
+    "kafka_ts",
+    "processed_ts",
+    "num_scooters_available"
+   ],
+   "exact_match": false
+  },
+  "success": true,
+  "result": {
+   "observed_value": [
+    "age_s",
+    "bikes_plus_docks",
+    "capacity",
+    "fetched_ts",
+    "is_installed",
+    "is_renting",
+    "is_returning",
+    "kafka_ts",
+    "last_reported_ts",
+    "num_bikes_available",
+    "num_bikes_disabled",
+    "num_docks_available",
+    "num_docks_disabled",
+    "num_ebikes_available",
+    "num_scooters_available",
+    "processed_ts",
+    "snapshot_ts",
+    "state",
+    "station_id"
+   ],
+   "details": {
+    "mismatched": {
+     "unexpected": [
+      "age_s",
+      "bikes_plus_docks"
+     ]
+    }
+   }
+  }
+ },
+ {
+  "type": "expect_column_pair_values_a_to_be_greater_than_b",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column_A": "capacity",
+   "column_B": "bikes_plus_docks",
+   "or_equal": true
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "missing_count": 0,
+   "missing_percent": 0.0,
+   "unexpected_percent_total": 0.0,
+   "unexpected_percent_nonmissing": 0.0,
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_compound_columns_to_be_unique",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column_list": [
+    "station_id",
+    "snapshot_ts"
+   ]
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "missing_count": 0,
+   "missing_percent": 0.0,
+   "unexpected_percent_total": 0.0,
+   "unexpected_percent_nonmissing": 0.0,
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_values_to_not_be_null",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "station_id"
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_values_to_not_be_null",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "snapshot_ts"
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_values_to_be_in_set",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "state",
+   "value_set": [
+    "offline",
+    "empty",
+    "full",
+    "low",
+    "high",
+    "ok"
+   ]
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "missing_count": 0,
+   "missing_percent": 0.0,
+   "unexpected_percent_total": 0.0,
+   "unexpected_percent_nonmissing": 0.0,
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_values_to_be_between",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "num_bikes_available",
+   "min_value": 0.0
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "missing_count": 0,
+   "missing_percent": 0.0,
+   "unexpected_percent_total": 0.0,
+   "unexpected_percent_nonmissing": 0.0,
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_values_to_be_between",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "num_docks_available",
+   "min_value": 0.0
+  },
+  "success": true,
+  "result": {
+   "element_count": 382143,
+   "unexpected_count": 0,
+   "unexpected_percent": 0.0,
+   "partial_unexpected_list": [],
+   "missing_count": 0,
+   "missing_percent": 0.0,
+   "unexpected_percent_total": 0.0,
+   "unexpected_percent_nonmissing": 0.0,
+   "partial_unexpected_counts": []
+  }
+ },
+ {
+  "type": "expect_column_min_to_be_between",
+  "kwargs": {
+   "batch_id": "lake-silver_newest_24h",
+   "column": "age_s",
+   "max_value": 300.0
+  },
+  "success": false,
+  "result": {
+   "observed_value": 1526
+  }
+ }
+]

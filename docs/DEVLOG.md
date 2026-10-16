@@ -1553,3 +1553,143 @@ data gap, and the Phase 2 `accept-k-*` checks). Then Phase 2 was built in the sa
 them. After the backfill, the `marts_daily` memgate read 1,527 MiB, just under 1,536, so my runner stopped there. I
 resumed it from `accept-i-marts`, and every later check passed. The gate is borderline on this host once the trips
 checks run.
+
+## 2026-10-16 · Loop L · Great Expectations in the `marts_daily` quality gate, GE results and readable latency on the Pipeline page
+
+**Goal:** the M5 Great Expectations item, run inside `marts_daily`'s existing quality gate, its results in
+`quality_gate.json`, `health.json` and on the Pipeline page, plus the Loop K follow-ups on the same page and docs:
+duration ticks on the latency chart with labels that never overlap the axis title, a duration under the latency tile,
+a fresh Trino JVM before `marts_daily`, the stale CURRENT_STATE lines, the `helpers.js` import nit and a heatmap
+coverage proposal. OpenLineage / Marquez stay for Loops M and N.
+
+**Re-base of the carried guards:** Loop K is committed (481c2e2), so `check_k.py` was re-based onto 47c9164..481c2e2
+(scope, its guard's test-file / `src/dockwatch/batch` / DAG rules, and its IMPLEMENTATION_PLAN rules on the committed
+file); `check_l.py` takes over the working tree since 481c2e2 with Loop-L-specific rules. Ids, commands and kinds of
+every carried check are unchanged; 14 new checks were added after their named neighbours (181 in total).
+
+**D1, the GE venv:**
+- Great Expectations **1.24.0** (the newest 1.x on PyPI) lives in its own venv `/opt/gx-venv` in the Airflow image,
+  like the dbt venv. `infra/airflow/gx-requirements.txt` is the full `pip freeze` of a venv resolved inside the image
+  from `great_expectations[trino]==1.24.0`: 41 packages, including SQLAlchemy 2.1.4, trino 0.340.0, pandas 3.0.6,
+  numpy 2.5.4 and scipy 1.18.1.
+- Airflow's own environment is untouched (SQLAlchemy 1.4.54, pandas 2.1.4, numpy 1.26.4); its python cannot import GE.
+  `GX_ANALYTICS_ENABLED=False` in the image's `ENV`: no usage analytics and no network at run time.
+- The Dockerfile gained one block after the dbt block (every old line kept); `host.BUILD_INPUTS` is now the
+  Dockerfile, `dbt-requirements.txt` and `gx-requirements.txt`, so `ensure_image()` rebuilds when the pins change.
+  The image grew from 3.28 to 3.86 GB (the venv is 432 MB on disk). The rebuild took 40 s with Docker's cache.
+
+**The spike on real data, and a GE gap on Trino:**
+- SQLAlchemy 2.1 with the trino dialect worked; the SQLAlchemy 2.0 fallback was not needed.
+- The first run on Trino passed only the row count: every column expectation failed with "The column ... in
+  BatchData does not exist", in 0.6 s. Cause: with `create_temp_table=False` the batch is a plain `TextClause`, which
+  has no `selected_columns`, so GE falls back to its Trino-specific reflection. That fallback takes the table after
+  the query's last `FROM` (`lake.silver.station_status`) and looks it up in `information_schema` under the
+  connection's default schema (none), so it finds nothing; even with a default schema it could never see the derived
+  columns `bikes_plus_docks` and `age_s`. This does not depend on the SQLAlchemy version (the branch is chosen by
+  dialect name).
+- Fix, inside the runner only: `gx_run.reflect_trino_queries()` replaces GE's module-level
+  `column_reflection_fallback` for the Trino dialect and a `TextClause` with `SELECT * FROM (<query>) LIMIT 0`
+  (planned, not scanned) and returns its column names. Every other dialect and selectable goes to GE's own function.
+  It is marked to re-check on every GE upgrade. A view or a temp table would have solved it too, but the plan allows
+  no table in the lake.
+- After the fix: 10 expectations evaluated on 382,143 rows in 4.1 s, the GE process at **225 MiB** max RSS
+  (`ru_maxrss` of the subprocess), and no GE table in the lake.
+
+**D2-D4, suite, runner and gate:**
+- `src/dockwatch/batch/expectations.py` (pure, stdlib only) holds the suite **`silver_station_status`**, ten
+  expectations on `silver.station_status`: row count ≥ 1; the 17 columns (`exact_match` false, so additive evolution
+  passes); `station_id` and `snapshot_ts` not null; `state` in the six states; bikes and docks available ≥ 0;
+  `capacity` ≥ `bikes_plus_docks` (or equal; capacity includes disabled bikes and docks, which is the tolerance);
+  **uniqueness** of (`station_id`, `snapshot_ts`); and **freshness** (minimum `age_s` ≤ 300), the only non-blocking
+  one, a **warning**.
+- The batch is the newest **24 hours** of silver: from silver's `max(snapshot_ts)` − 24 h (exclusive) to it
+  (inclusive), as a query asset that adds `bikes_plus_docks` and `age_s = date_diff('second', processed_ts, now)` with
+  `now` fixed as a literal at the run's start.
+- GE returns results in its own order; they are matched by (type, column key). A suite entry GE did not report never
+  passes. The uniqueness count is the rows in duplicated groups, as GE counts them; a min reported as text becomes a
+  number. Status: `ok` if success, else `fail` if **blocking**, else `warn`.
+- `src/dockwatch/batch/gx_run.py`, run as `/opt/gx-venv/bin/python -m dockwatch.batch.gx_run trino`: an ephemeral
+  context, an SQL datasource on `trino://dockwatch@trino:8080/lake` with `create_temp_table=False`, the query asset,
+  the suite, a ValidationDefinition and the Checkpoint `marts_daily_quality` (result format SUMMARY), then
+  `data/quality/expectations.json` (format 1) written atomically. It never imports `dockwatch.config`. A `frame` mode
+  runs the same suite on small pandas frames for the Airflow-image test. GE's progress bars are off in the task log.
+- `dag_tasks.marts_quality_gate` keeps the DAG's five tasks: it builds the dbt gate as before, reads silver's newest
+  `snapshot_ts`, runs the runner (timeout 900 s), merges the results and writes `quality_gate.json`. The merge adds
+  `expectations` (suite, evaluated, passed, warnings, failed, path), one `gx:` problem per failed blocking
+  expectation, and `passed` = dbt part passed and no blocking failure. A missing or unusable results document (not
+  format 1, another run's, an incomplete suite) adds `gx: no results (...)` and fails the gate. A crashed runner
+  writes that gate and then raises, so Airflow retries; a failed blocking expectation calls `fail()` (no retry), like
+  a failed dbt test. The dbt keys keep their meaning.
+
+**D5, health.json:** `dag_tasks.health_export` copies `data/quality/expectations.json` unchanged into
+`quality.expectations` (null when missing). `health.py` and the format are unchanged; the `quality` status still
+follows `quality_gate.json` `passed`, which now includes GE.
+
+**Real runs** (memgates passed; the console was stopped by the memgate as usual):
+- `batch-up` (fresh JVM), then `dag-test marts_daily`: success in 44.5 s. Peaks: **`airflow-cli` 541 MiB** (the same
+  peak as Loop K: dbt's step is the larger one; the GE subprocess adds ~225 MiB after dbt has exited, and
+  `docker stats` samples every ~3 s), **Trino 1,717 MiB** (under the 1,950 MiB flag). Metaspace afterwards **179.3 /
+  184.1 MiB** used / committed. The GE run took 2.7 s.
+- Results on real silver: 382,143 rows (2026-10-15 12:22:16 to 2026-10-16 12:22:16 UTC); all 9 blocking
+  expectations passed with 0 unexpected rows; freshness warned at 1,922 s (Spark runs on demand and never beside
+  Trino, so it always warns during `marts_daily`; that is honest and matches the stream status). `quality_gate.json`
+  passed: 28 of 28 dbt tests, expectations 10 / 9 / 1 / 0. `check_l expectations` recomputed every result
+  independently on Trino and matched, and found no GE table in the lake.
+- `batch-stop` + `batch-up`, then `dag-test pipeline_health`: success in 26.8 s, Trino 1,099 MiB, `airflow-cli`
+  430 MiB, `health.json` 82,773 B of 500,000. That file is the new Playwright fixture `tests/web/fixtures/health.json`
+  (its p95 tile is now 75,860.6 s, 21 h 4 min: a catchup landed a long backlog).
+
+**D6, the Pipeline page:**
+- **Expectations card** "Great Expectations on silver" after the data-quality card: a takeaway ("9 of 10 checks
+  passed; freshness is a warning: Spark runs on demand"; a failed blocking check says the insights were not
+  refreshed), a table (Check, Column, Result badge Passed / Warning / Failed, Found = unexpected rows, the row count
+  or the newest row's age as a duration) and a caption with the GE version, suite, rows and when `marts_daily`
+  checked. With no results: a `card-soft` "No Great Expectations results yet." The dbt card is unchanged.
+- **Latency axis:** `charts.durationTicks()` gives round ticks in one unit from the axis maximum (seconds below 2 min,
+  minutes below 2 h, else hours: `30 s`, `20 min`, `12 h`), the y title is "Latency", and `lineChart` now measures the
+  widest tick label (`getComputedTextLength`) and the title's line box (`getBBox`) to set the left margin, placing the
+  rotated title from its measured ascent. Two things had to change for the measurement to be real: each chart card is
+  marked ready before it is drawn (a hidden svg measures 0), and `drawOnResize` redraws once `document.fonts.ready`
+  resolves (the labels are measured in the web font). The events chart uses the same code with its number ticks.
+  The first overlap test failed at 320 px: the rotated title's box started 2.5 px left of the svg, because a text's
+  box is not centred on its baseline; placing it at `2 - bbox.y` fixed it.
+- **Latency tile:** the value stays `75,860.6 s` (pinned by `pipeline.spec.js`); the sub-line starts with the p95 as
+  a **duration**: "21 h 4 min · fetch to silver, worst minute of the last active hour". The takeaway uses durations
+  too.
+- `tests/web/helpers.js`: the two `node:path` imports merged into one; nothing else.
+- `tests/web/pipeline-quality.spec.js` (5 tests): the card lists every result with its badge, column, found value,
+  takeaway and caption, and a failed variant; the empty state for `quality.expectations` null and missing; the latency
+  y labels match `^\d+(\.\d+)? (s|min|h)$` in one unit and each label's box starts right of the title's box at 320,
+  390, 768 and 1440 px, for the fixture, a p95 scaled past 100,000 s and one under 120 s; the tile's sub-line; axe on
+  the card with and without results in light and dark.
+
+**D7, a fresh Trino JVM before `marts_daily`:** the new check `accept-l-trino-restart` (`batch-stop && batch-up &&
+check_g batch`) sits right before `metric-i-memgate-marts`, so `marts_daily` no longer follows the trips stage on a
+JVM that had reached 2,024 of 2,048 MiB. No limit or JVM change; CURRENT_STATE records it as an operating rule.
+`metric-j-trino-metaspace` now measures the marts on a fresh JVM (a metric only).
+
+**D8 and the follow-ups:** CURRENT_STATE's stale lines are gone ("Great Expectations is not used yet", the "without
+GE results" wording, Loop K's Phase-1 Metaspace numbers, replaced by this run's), and every "third writer" sentence
+lists `metrics.pipeline_minutely`. DESIGN_BACKLOG gained #61 (the expectations card) and #62, a proposed heatmap
+minimum coverage (at least 12 of 24 hours) for the user to decide: `insights.spec.js` pins today's ranking. #58 notes
+that units and overlap are fixed while the scale is still open.
+
+**Tests:** host 133 pass, 6 skipped (`tests/test_expectations.py`, 6, on a real GE result captured from the spike in
+`tests/fixtures/gx/raw_results.json`); Airflow image 18 pass (`tests/airflow/test_loopl_gx.py`, 3: the venv has exactly
+the pinned set and Airflow does not see GE; the suite in the GE venv passes a clean frame and flags a duplicate, a
+negative count, an unknown state, an over-capacity row and an old batch each in exactly its expectation;
+`marts_quality_gate` runs the checkpoint and merges it, fails without retry on a blocking failure and retries on a
+crash); Playwright 74 in total.
+
+**Full check run (all 181 checks, after the build):** no regression; every carried check that passed at baseline
+passed, and all 14 Loop L checks passed. `dag-test marts_daily` on the restarted JVM: 42.7 s, **`airflow-cli` peak
+634 MiB** (this time the 3 s sampler caught the GE step; under the 900 MiB stop line), Trino 1,694 MiB, Metaspace
+179.8 / 184.7 MiB; GE 3.1 s on 381,554 rows, the same 9 passed, freshness warned at 2,564 s. `pipeline_health`
+afterwards: 25.5 s, Trino 1,074 MiB, `health.json` 82,725 B. The memgate before the trips stage once read 687 MiB
+free (the Docker VM held ~3 GB of page cache after the CI-container and Spark checks); after ~2 idle minutes WSL
+released the cache (2,264 MiB available) and the run was resumed from that memgate. Nothing was stopped or
+loosened; it is the same borderline host the Loop K entry describes.
+
+**Cut, and why:** OpenLineage / Marquez and the Spark listener (Loops M and N, so F4b stays unticked: no lineage
+screenshot); the heatmap coverage rule itself (a design call, and `insights.spec.js` is frozen); a log or capped
+latency axis (#58, a design call); METRICS.md and Lighthouse (Loops O and P); any `mem_limit` or JVM change.

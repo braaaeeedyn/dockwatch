@@ -1,9 +1,9 @@
 // Pipeline page (F4b): the overall status banner, four stat tiles, the latency and events/min charts, table freshness,
-// the dbt tests and quality gate, and files before / after the latest compaction, all from data/health.json
-// (pipeline_health). States as on Insights: skeletons + aria-busy; 404 -> "not published yet"; any other failure or a
+// the dbt tests and quality gate, the Great Expectations results on silver, and files before / after the latest
+// compaction, all from data/health.json (pipeline_health). States as on Insights: skeletons + aria-busy; 404 -> "not published yet"; any other failure or a
 // read that has not answered after 10 s -> a message with Retry. Status colours appear only on this page (DESIGN §2).
 
-import { drawOnResize, lineChart } from "./charts.js";
+import { drawOnResize, durationTicks, lineChart } from "./charts.js";
 import { initShell } from "./shell.js";
 import { readJson } from "./util/read.js";
 import { formatDateTime, formatDuration, formatShortClock, parseTime } from "./util/time.js";
@@ -38,6 +38,15 @@ function rowsOf(block) {
 
 function seconds(value) {
   return value === null || value === undefined ? "—" : `${oneDecimal.format(value)} s`;
+}
+
+/** What an expectation found: its unexpected rows, or its observed value with a unit (rows, or the newest row's age). */
+function foundText(r) {
+  if (r.unexpected_count !== null && r.unexpected_count !== undefined) {
+    return `${number.format(r.unexpected_count)} unexpected ${r.unexpected_count === 1 ? "row" : "rows"}`;
+  }
+  if (r.observed === null || r.observed === undefined) return "—";
+  return r.column === "age_s" ? `${formatDuration(r.observed * 1000)} old` : `${number.format(r.observed)} rows`;
 }
 
 function initPipeline() {
@@ -119,7 +128,8 @@ function render(root, doc) {
     el.querySelector("[data-kpi-value]").textContent = value;
     el.querySelector("[data-kpi-sub]").textContent = sub;
   };
-  tile("latency", seconds(t.latency_p95_s), "fetch to silver, worst minute of the last active hour");
+  const p95 = t.latency_p95_s === null ? "" : `${formatDuration(t.latency_p95_s * 1000)} · `;
+  tile("latency", seconds(t.latency_p95_s), `${p95}fetch to silver, worst minute of the last active hour`);
   tile("events", t.events_per_min === null ? "—" : oneDecimal.format(t.events_per_min), "station updates a minute, last active hour");
   tile("lag", t.lag_records === null ? "—" : number.format(t.lag_records), "records published but not yet in silver");
   tile("freshness", t.freshness_s === null ? "—" : formatDuration(t.freshness_s * 1000), "since the newest row reached silver");
@@ -133,17 +143,17 @@ function render(root, doc) {
   const worstP95 = Math.max(...active.map((r) => r.latency_p95_s ?? 0), 0);
   const lat = root.querySelector('[data-chart="latency"]');
   lat.querySelector("[data-takeaway]").textContent = active.length
-    ? `The slowest minute's p95 was ${seconds(worstP95)}, ${worstP95 > SLA_S ? "over" : "within"} the 5 min SLA; ` +
+    ? `The slowest minute's p95 was ${formatDuration(worstP95 * 1000)}, ${worstP95 > SLA_S ? "over" : "within"} the 5 min SLA; ` +
       `${number.format(active.length)} of the last ${number.format(minutes.length)} minutes landed data in silver.`
     : `No data reached silver in the last ${number.format(minutes.length)} minutes: the stream was not running.`;
   lat.querySelector("[data-caption]").textContent = `Source: lake.metrics.pipeline_minutely, ${window} (Pacific).`;
+  lat.classList.add("is-ready"); // before drawing: the chart measures its labels, which needs the svg shown
   drawOnResize(lat.querySelector("[data-chart-box]"), (width) =>
     lineChart(lat.querySelector("svg"), times, [
       { values: minutes.map((r) => r.latency_p50_s), className: "chart__line--primary" },
       { values: minutes.map((r) => r.latency_p95_s), className: "chart__line--secondary" },
-    ], { width, yLabel: "Seconds", formatY: (v) => `${v} s`, formatTime: formatShortClock, threshold: { value: SLA_S, label: "5 min SLA" } }),
+    ], { width, yLabel: "Latency", yTicks: durationTicks, formatTime: formatShortClock, threshold: { value: SLA_S, label: "5 min SLA" } }),
   );
-  lat.classList.add("is-ready");
 
   const ev = root.querySelector('[data-chart="events"]');
   const totalEvents = minutes.reduce((s, r) => s + r.events, 0);
@@ -151,11 +161,11 @@ function render(root, doc) {
     `${number.format(totalEvents)} station updates were published in the last 24 hours ` +
     `(${oneDecimal.format(totalEvents / Math.max(1, minutes.length))} a minute on average).`;
   ev.querySelector("[data-caption]").textContent = `Source: lake.metrics.pipeline_minutely, ${window} (Pacific).`;
+  ev.classList.add("is-ready");
   drawOnResize(ev.querySelector("[data-chart-box]"), (width) =>
     lineChart(ev.querySelector("svg"), times, [{ values: minutes.map((r) => r.events), className: "chart__line--primary" }],
       { width, yLabel: "Events per minute", formatY: (v) => number.format(v), formatTime: formatShortClock }),
   );
-  ev.classList.add("is-ready");
 
   // ---- freshness per table ----
   const tables = rowsOf(doc.tables);
@@ -221,6 +231,43 @@ function render(root, doc) {
     : `All ${(q.tests ?? []).length} dbt tests passed.`;
   quality.querySelector("[data-caption]").textContent = "Source: dbt run_results.json and data/dbt/quality_gate.json (marts_daily).";
   quality.classList.add("is-ready");
+
+  // ---- Great Expectations on silver (the checkpoint inside marts_daily's quality gate) ----
+  const gx = q.expectations ?? null;
+  const exp = root.querySelector('[data-chart="expectations"]');
+  for (const el of exp.querySelectorAll("[data-takeaway], [data-expectations-table], [data-caption]")) el.hidden = !gx;
+  exp.querySelector("[data-expectations-none]").hidden = Boolean(gx);
+  if (gx) {
+    exp.querySelector("tbody").replaceChildren(
+      ...(gx.results ?? []).map((r) => {
+        const tr = document.createElement("tr");
+        const th = document.createElement("th");
+        th.scope = "row";
+        th.textContent = r.label;
+        const column = document.createElement("td");
+        column.className = "data";
+        column.textContent = r.column ? r.column.replaceAll(",", ", ") : "whole batch";
+        const result = document.createElement("td");
+        result.append(badge(r.status, STATUS[r.status]?.result ?? r.status));
+        const found = document.createElement("td");
+        found.className = "num";
+        found.textContent = foundText(r);
+        tr.append(th, column, result, found);
+        return tr;
+      }),
+    );
+    const freshnessWarns = (gx.results ?? []).some((r) => r.column === "age_s" && r.status === "warn");
+    const parts = [`${number.format(gx.passed)} of ${number.format(gx.evaluated)} checks passed`];
+    if (gx.failed) parts.push(`${number.format(gx.failed)} blocking ${gx.failed === 1 ? "check" : "checks"} failed, so the insights were not refreshed`);
+    if (freshnessWarns) parts.push("freshness is a warning: Spark runs on demand");
+    else if (gx.warnings) parts.push(`${number.format(gx.warnings)} ${gx.warnings === 1 ? "warning" : "warnings"}`);
+    exp.querySelector("[data-takeaway]").textContent = `${parts.join("; ")}.`;
+    const checked = parseTime(gx.run_at);
+    exp.querySelector("[data-caption]").textContent =
+      `Source: Great Expectations ${gx.gx_version}, suite ${gx.suite}, newest 24 h of silver ` +
+      `(${number.format(gx.batch?.rows ?? 0)} rows), checked by marts_daily at ${checked ? formatDateTime(checked) : "an unknown time"} (Pacific).`;
+  }
+  exp.classList.add("is-ready");
 
   // ---- compaction: files before and after the latest maintenance run ----
   const runs = rowsOf(doc.compaction);

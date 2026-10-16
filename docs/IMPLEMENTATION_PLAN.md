@@ -233,7 +233,8 @@ operations every time; `data/cdc/e2e-report.json`.)*
       1.10.23 + dbt-trino 1.10.6 in `/opt/dbt-venv`; 28 tests; the `aws` target is declared, not run.)*
 - [x] DAG `marts_daily`: dbt build → Great Expectations checkpoint → **only then** export `web/data/insights/*.json`.
       *(M4b: the checkpoint is a quality gate on dbt's `run_results.json`, mart rows and freshness; Great
-      Expectations suites join it in M5.)*
+      Expectations suites join it in M5.)* *(Loop L: the gate now also runs the Great Expectations checkpoint
+      `marts_daily_quality` on silver; the DAG keeps its five tasks.)*
 - [x] Retries with exponential backoff, SLA misses and task failures alert (email/SNS on aws, log locally).
       *(M4a: one shared `default_args`; alerts to `data/airflow/alerts.jsonl`, SNS when a topic is set.)*
 
@@ -266,8 +267,12 @@ path-casing guard. **M4b** (next): `trip_history_monthly`, the dbt project on th
 | `dag-test` refuses while another `airflow-cli` runs; the Airflow image rebuilds when its build inputs change. | A `dag-test` fails stale runs, which would include a live backfill; a stale image would run without the dbt venv. |
 
 ### M5 · Quality, lineage, observability (week 7)
-- [ ] Great Expectations suites: schema; ranges (`num_bikes_available ≥ 0`, `bikes + docks ≤ capacity` with a
+- [x] Great Expectations suites: schema; ranges (`num_bikes_available ≥ 0`, `bikes + docks ≤ capacity` with a
       tolerance for disabled docks); uniqueness; freshness (`silver.station_status` updated < 5 min ago).
+      *(Loop L: suite `silver_station_status`, 10 expectations on the newest 24 hours of `silver.station_status`, run
+      as the checkpoint `marts_daily_quality` inside `marts_daily`'s quality gate with GE 1.24.0 from `/opt/gx-venv`;
+      blocking failures stop the export, freshness only warns; results in `data/quality/expectations.json`,
+      `quality_gate.json`, `health.json` and on the Pipeline page.)*
 - [ ] OpenLineage: Airflow provider + Spark listener → Marquez (`obs` profile). Screenshot of the graph from
       `gbfs.station_status` to each mart, saved to `docs/img/lineage.png`.
 - [x] `metrics/`: `metrics.pipeline_minutely` (events/min, end-to-end latency p50/p95 = Iceberg commit time −
@@ -286,6 +291,7 @@ shows the full graph.
 | `pipeline_health` runs on a restarted Trino after the full M4a + M4b sequence (`batch-stop` + `batch-up`); no limit or JVM change. | Trino sits at 1.8–2.0 GiB of its 2 GiB after that sequence. |
 | `iceberg_maintenance` covers the M4b and metrics tables (16), `bronze.trips` one month partition per run. | Rewriting all 13 months at once took Trino to 2,024 MiB; one partition keeps one `replace` commit per run. |
 | Great Expectations and OpenLineage → Marquez move to the next loop. | A new runtime inside the carried `marts_daily` gate, and five integration surfaces, did not fit Loop K's budget; Marquez will run on demand only, never beside Trino / Spark / Connect. |
+| Great Expectations (Loop L) runs in its own pinned venv in the Airflow image, as a subprocess of `marts_daily`'s `quality_gate` task, on a query asset over the newest 24 h of silver with no temp tables; blocking expectations fail the gate, freshness only warns; `marts_daily` gets a freshly restarted Trino. | GE 1.24 needs SQLAlchemy 2 and pandas 3 while Airflow 2.11.2 keeps SQLAlchemy 1.4; a new task or DAG would change the carried DAG shape; Spark never runs beside Trino, so freshness can never be under 5 min during the run; Trino had sat at up to 2,024 of 2,048 MiB after the trips stage. |
 
 ### M6 · AWS target, CI/CD, measurements (week 8)
 - [ ] `terraform apply` (after the manual AWS steps in M0). Point `DOCKWATCH_TARGET=aws` at S3 + Glue; run the stream
@@ -355,7 +361,8 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
 - [ ] Pipeline: status summary, latency p50/p95 line chart, events/min, consumer lag, freshness per table, GE results
       table, compaction before/after, lineage screenshot. *(Loop K: `pipeline.html` on `health.json` has all of it
       except the GE results (the dbt tests and quality gate are shown instead) and the lineage screenshot; not ticked
-      until those exist.)*
+      until those exist.)* *(Loop L: the GE results card "Great Expectations on silver" is built on
+      `health.json` `quality.expectations`; still unticked until the lineage screenshot exists.)*
 - **Done when:** every chart reads from a JSON export produced by the pipeline, none hand-made.
 
 ### F5 · Polish and launch (week 8)

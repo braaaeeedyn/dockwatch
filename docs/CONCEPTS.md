@@ -415,3 +415,40 @@ a day; batch tables are healthy within 48 hours.
 **Worst-of status.** The overall status is the worst of its parts (stream, data quality, maintenance), so one red part
 is never averaged away by two green ones. Each part says why in words, and the page shows an icon and a word next to
 the colour, never colour alone.
+
+## Data quality: expectations vs tests, suite, checkpoint, batch, blocking vs warning (Loop L)
+
+**Tests and expectations.** A dbt test checks a model dbt just built: "this key is unique", "this column is never
+null". It runs as part of the build and answers pass or fail. An expectation (Great Expectations' word) is a
+statement about data you did not necessarily build, written as a rule with parameters: "`num_bikes_available` is
+between 0 and nothing", "the minimum `age_s` is at most 300". Each one reports what it found, not only pass or fail:
+how many rows broke it, out of how many, or the value it observed. DockWatch uses both: dbt tests on the marts it
+builds, expectations on `silver.station_status`, the table everything else is built from, which Spark writes and
+dbt only reads.
+
+**Suite.** A suite is a named list of expectations for one kind of data. `silver_station_status` holds ten: the
+schema (the 17 columns, extra ones allowed so adding a column does not break the gate), a row count, keys never null,
+the six states, counts never negative, bikes plus docks within capacity, one row per station per snapshot, and
+freshness. The suite is plain data in `batch/expectations.py`, so it can be read and tested without Great
+Expectations installed.
+
+**Batch.** Expectations run on a batch: the exact rows being judged. Here it is the newest 24 hours of silver, from
+the newest `snapshot_ts` back, as a query that also derives `bikes_plus_docks` and `age_s`. The window is anchored on
+the data's own newest row, not the clock, so a stream that stopped yesterday still gets a full day checked, and `now`
+is fixed as a literal so every expectation in one run sees the same ages. The check can recompute the same batch on
+Trino and compare every number.
+
+**Checkpoint.** A checkpoint is the runnable thing: which suite on which batch, with which result format, and what
+to do with the results. `marts_daily_quality` runs once per `marts_daily`, inside its `quality_gate` task, and its
+results go to `data/quality/expectations.json`, the gate, `health.json` and the Pipeline page.
+
+**Blocking vs warning.** Not every broken rule should stop the pipeline. A blocking expectation guards correctness:
+duplicates, impossible counts or a missing column would make the published insights wrong, so the gate fails and
+nothing is exported. A warning reports a condition worth seeing that does not make the output wrong: silver being
+more than 5 minutes old during `marts_daily` is always true here, because Spark runs on demand and never beside
+Trino, and blocking on it would mean never publishing. The rule is decided per expectation, written next to it, and
+shown on the page as Passed / Warning / Failed.
+
+**A gate never passes silently.** If the expectation run crashes or leaves no usable results (another run's file, a
+missing expectation), the gate records `gx: no results (...)` and fails, exactly as if a blocking expectation had
+failed. A quality check that can disappear without anyone noticing is worse than none.
