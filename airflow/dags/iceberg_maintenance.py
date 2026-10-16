@@ -1,6 +1,8 @@
-"""Daily Iceberg maintenance on the 9 lake tables through Trino (M4a). Logic: dockwatch.batch.maintenance.
+"""Daily Iceberg maintenance on 16 lake tables through Trino (M4a; Loop K adds the M4b and metrics tables).
+Logic: dockwatch.batch.maintenance.
 
-guard -> maintain (one table at a time: measure, optimize, expire_snapshots, remove_orphan_files, measure)
+guard -> maintain (one table at a time: measure, optimize, expire_snapshots, remove_orphan_files, measure; a batch
+                   table that does not exist yet is `skipped`)
       -> record (one INSERT into lake.metrics.maintenance_runs; fails if any table failed)
 """
 
@@ -31,7 +33,7 @@ with DAG(
     guard = PythonOperator(task_id="guard", python_callable=dag_tasks.maintenance_guard)
     maintain = PythonOperator.partial(
         task_id="maintain", python_callable=dag_tasks.maintain_table, max_active_tis_per_dag=1
-    ).expand(op_kwargs=[{"table": t} for t in maintenance.TABLES])
+    ).expand(op_kwargs=[{"table": t} for t in maintenance.ALL_TABLES])
     record = PythonOperator(
         task_id="record",
         python_callable=dag_tasks.record_maintenance,

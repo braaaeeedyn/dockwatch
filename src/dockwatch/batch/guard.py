@@ -17,6 +17,7 @@ TRINO_TASKS = (
     "partition_evolution_demo",
     "trip_history_monthly",
     "marts_daily",
+    "pipeline_health",
 )
 TRINO_BLOCKERS = ("status-stream", "cdc-apply", "connect")
 # Spark and Connect work: refused while Trino runs.

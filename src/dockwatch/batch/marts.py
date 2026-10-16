@@ -23,6 +23,16 @@ INSIGHTS = {
 DAILY_DATES = 30
 SIZE_BUDGET = 2_000_000
 FLOAT_DIGITS = 3  # full doubles put trips_vs_availability.json at 2.3 MB; 4 digits can still pass 2 MB
+# Insights format 2 (Loop K): the station columns become one lookup per file and the per-file constants a `window`
+# header, so a row no longer repeats a 36-char station_id, a name and the window on every station x hour / day.
+INSIGHTS_FORMAT = 2
+STATION_KEYS = {"station_id": "station_id", "station_name": "name", "region_id": "region_id"}  # mart -> lookup
+WINDOW_COLUMNS = {
+    "station_availability_daily": (),
+    "rebalancing_need": ("window_first_day", "window_last_day"),
+    "trips_vs_availability": ("trip_days", "trip_first_month", "trip_last_month"),
+}
+DROPPED_COLUMNS = ("first_window", "last_window")  # per-station 5-minute window bounds; the page does not use them
 STATION_TABLE = "lake.bronze.station_information"
 STATION_COLUMNS = (
     ("station_id", "varchar"),
@@ -124,14 +134,50 @@ def write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def export_insights(out: Path, tables: dict[str, tuple[list[str], list[list]]], manifest: dict) -> dict:
-    """Write web/data/insights/<name>.json for every (columns, rows) table, then manifest.json last, each through a
-    temp file + os.replace. Every document is checked against SIZE_BUDGET before anything is written."""
+def insights_v2(name: str, columns: list[str], rows: list[list]) -> tuple[list[str], list[list], dict]:
+    """A mart's (columns, rows) -> format 2: columns starting with `station` (an index into `stations.rows`), the rows
+    without the station / window / dropped columns, and the extra document keys (format, window, stations). Stations
+    are listed in order of first use; the daily file's service_date is an index into window.service_dates. A window
+    column that is not constant raises GateError (it would be lost)."""
+    at = {c: i for i, c in enumerate(columns)}
+    window_cols = WINDOW_COLUMNS[name]
+    keep = [i for i, c in enumerate(columns) if c not in STATION_KEYS and c not in window_cols + DROPPED_COLUMNS]
+    stations, index, out = [], {}, []
+    for r in rows:
+        sid = r[at["station_id"]]
+        if sid not in index:
+            index[sid] = len(stations)
+            stations.append([plain(r[at[c]]) for c in STATION_KEYS])
+        out.append([index[sid], *(r[i] for i in keep)])
+    window = {}
+    for c in window_cols:
+        values = {plain(r[at[c]]) for r in rows}
+        if len(values) > 1:
+            raise GateError(f"{name}: {c} has {len(values)} different values; format 2 keeps it once in `window`")
+        window[c] = values.pop() if values else None
+    if name == "station_availability_daily":
+        # service_date becomes an index into window.service_dates, ~11 bytes less per row (1,000 stations x 30 dates
+        # with every float at 3 digits: 1.98 MB with ISO dates in the rows, 1.67 MB with the index)
+        col = 1 + keep.index(at["service_date"])
+        dates = sorted({plain(r[col]) for r in out})
+        pos = {d: i for i, d in enumerate(dates)}
+        for r in out:
+            r[col] = pos[plain(r[col])]
+        window = {"service_dates": dates}
+    extra = {"format": INSIGHTS_FORMAT, "window": window,
+             "stations": {"columns": list(STATION_KEYS.values()), "rows": stations}}  # fmt: skip
+    return ["station", *(columns[i] for i in keep)], out, extra
+
+
+def export_insights(out: Path, tables: dict[str, tuple], manifest: dict) -> dict:
+    """Write web/data/insights/<name>.json for every (columns, rows) or (columns, rows, extra) table (extra: more
+    top-level keys, e.g. insights_v2's), then manifest.json last, each through a temp file + os.replace. Every
+    document is checked against SIZE_BUDGET before anything is written."""
     now = datetime.now(UTC).isoformat(timespec="seconds")
     docs = {}
-    for name, (columns, rows) in tables.items():
-        doc = {"generated_at": now, "source": f"lake.marts.{INSIGHTS[name][0]}", "columns": columns,
-               "rows": [[plain(v) for v in r] for r in rows]}  # fmt: skip
+    for name, (columns, rows, *extra) in tables.items():
+        doc = {"generated_at": now, "source": f"lake.marts.{INSIGHTS[name][0]}", **(extra[0] if extra else {}),
+               "columns": columns, "rows": [[plain(v) for v in r] for r in rows]}  # fmt: skip
         docs[name] = json.dumps(doc, separators=(",", ":")) + "\n"
         size = len(docs[name].encode("utf-8"))
         if size > SIZE_BUDGET:

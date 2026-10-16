@@ -161,6 +161,35 @@ def spark_inspect(*args: str) -> None:
     )
 
 
+def dbt_compile(*args: str) -> None:
+    """Compile the dbt project offline with the Airflow image's pinned dbt (uv, Python 3.12): every model and test must
+    still compile. --no-populate-cache keeps dbt from connecting to Trino, so it runs in CI with no Trino at all."""
+    os.environ["DBT_SEND_ANONYMOUS_USAGE_STATS"] = "false"
+    sh(
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.12",
+        "--with-requirements",
+        "infra/airflow/dbt-requirements.txt",
+        "dbt",
+        "compile",
+        "--no-populate-cache",
+        "--project-dir",
+        "dbt/dockwatch",
+        "--profiles-dir",
+        "dbt/dockwatch",
+        "--target",
+        "local",
+        "--target-path",
+        os.path.abspath("data/dbt-compile/target"),  # dbt reads a relative target path from the project dir
+        "--log-path",
+        "data/dbt-compile/logs",
+        *args,
+    )
+
+
 TASKS = {
     "lint": lambda *a: (uv("ruff", "check", "."), uv("ruff", "format", "--check", ".")),
     "fmt": lambda *a: (uv("ruff", "format", "."), uv("ruff", "check", "--fix", ".")),
@@ -256,6 +285,8 @@ TASKS = {
     "scheduler-up": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-up", *a),
     "scheduler-stop": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-stop", *a),
     "trino-sql": lambda *a: uv("python", "-m", "dockwatch.batch", "trino-sql", *a),
+    # dbt project compiled offline (no Trino; also a CI step in the python job)
+    "dbt-compile": dbt_compile,
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),
     "tf-fmt": lambda *a: terraform("fmt", "-recursive"),
     "tf-fmt-check": lambda *a: terraform("fmt", "-check", "-recursive", "-diff"),

@@ -1,6 +1,6 @@
-"""Task callables for the three M4a DAGs and the two M4b DAGs. They run inside the Airflow containers (Airflow,
-`trino`, `docker`, `psycopg`, pyarrow and pyiceberg are imported lazily); the rules live in the pure modules (guard,
-maintenance, evolution, slot, alerts, trips, marts).
+"""Task callables for the three M4a DAGs, the two M4b DAGs and pipeline_health (M5, Loop K). They run inside the
+Airflow containers (Airflow, `trino`, `docker`, `psycopg`, pyarrow and pyiceberg are imported lazily); the rules live in
+the pure modules (guard, maintenance, evolution, slot, alerts, trips, marts, health).
 
 Guard failures (a Spark JVM or Kafka Connect beside Trino, a lost slot) raise AirflowFailException: no retry, alert.
 """
@@ -9,7 +9,7 @@ import json
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from dockwatch.batch import alerts, evolution, guard, maintenance, marts, slot, trips
+from dockwatch.batch import alerts, evolution, guard, health, maintenance, marts, slot, trips
 from dockwatch.config import get_settings
 
 PROJECT = "dockwatch"
@@ -116,10 +116,11 @@ def maintain_table(table: str, **context) -> dict:
 
 
 def record_maintenance(**context) -> None:
-    """One INSERT of every table's row into lake.metrics.maintenance_runs; fails if any table failed or is missing."""
+    """One INSERT of every table's row into lake.metrics.maintenance_runs (all 16 tables); fails if any table failed
+    or has no row. A `skipped` batch table (not created yet) does not fail the run."""
     ti = context["ti"]
     rows = []
-    for i, table in enumerate(maintenance.TABLES):
+    for i, table in enumerate(maintenance.ALL_TABLES):
         r = ti.xcom_pull(task_ids="maintain", key="row", map_indexes=i)
         if isinstance(r, list):  # some Airflow versions wrap single map-index pulls
             r = r[0] if r else None
@@ -140,10 +141,10 @@ def record_maintenance(**context) -> None:
     for sql in maintenance.create_metrics_sql():
         execute(sql)
     execute(maintenance.insert_sql(rows))
-    bad = [r["table_name"] for r in rows if r["status"] != "ok"]
+    bad = [r["table_name"] for r in rows if r["status"] not in ("ok", "skipped")]
     for r in rows:
         print(
-            f"{r['table_name']:28} {r['status']:5} files {r['files_before']} -> {r['files_after']}, snapshots "
+            f"{r['table_name']:38} {r['status']:7} files {r['files_before']} -> {r['files_after']}, snapshots "
             f"{r['snapshots_before']} -> {r['snapshots_after']}, rows {r['rows_after']}",
             flush=True,
         )
@@ -462,7 +463,8 @@ def marts_quality_gate(**context) -> dict:
 
 
 def marts_export(**context) -> dict:
-    """web/data/insights/*.json from the marts (only after the gate passed), manifest.json last."""
+    """web/data/insights/*.json (format 2: station lookup + window header) from the marts (only after the gate
+    passed), manifest.json last."""
     execute = trino_execute()
     tables = {}
     for name, (mart, order) in marts.INSIGHTS.items():
@@ -480,6 +482,7 @@ def marts_export(**context) -> dict:
     trips_w = execute("SELECT min(trip_first_month) AS a, max(trip_last_month) AS b FROM "
                       "lake.marts.mart_trips_vs_availability")  # fmt: skip
     manifest = {
+        "format": marts.INSIGHTS_FORMAT,
         "dag_run_id": context["dag_run"].run_id,
         "quality_gate": {k: gate.get(k) for k in ("passed", "tests", "warnings")},
         "windows": {
@@ -490,8 +493,74 @@ def marts_export(**context) -> dict:
         "source": "lake.marts (dbt on Trino; silver live data and bronze.trips Bay Wheels trip history)",
     }
     try:
-        man = marts.export_insights(insights_dir(), tables, manifest)
+        v2 = {name: marts.insights_v2(name, *table) for name, table in tables.items()}
+        man = marts.export_insights(insights_dir(), v2, manifest)
     except marts.GateError as e:
         fail(str(e))
     print(json.dumps(man["files"]), flush=True)
     return man["files"]
+
+
+# ---------------------------------------------------------------- pipeline_health (M5, Loop K)
+
+
+def health_guard(**context) -> None:
+    trino_guard("pipeline_health")
+
+
+def health_window(context: dict):
+    """The 1,440 minutes before the run's start minute."""
+    return health.window(getattr(context.get("dag_run"), "start_date", None) or datetime.now(UTC))
+
+
+def health_minutely(**context) -> dict:
+    """lake.metrics.pipeline_minutely for the run's window: four GROUP BYs on silver through Trino, the series in
+    Python, one pyiceberg transaction (delete the window and anything later, append), counted back through Trino."""
+    execute = trino_execute()
+    w0, w1 = health_window(context)
+    rows = health.minutely_rows(
+        w0,
+        execute(health.events_sql(w0, w1)),
+        execute(health.processed_sql(w0, w1)),
+        execute(health.lag_sql(w0, w1, "kafka_ts")),
+        execute(health.lag_sql(w0, w1, "greatest(kafka_ts, processed_ts)")),
+    )
+    for sql in health.create_sql():
+        execute(sql)
+    health.replace_window(w0, health.minutely_arrow(rows, context["dag_run"].run_id, datetime.now(UTC)))
+    n = int(execute(health.count_sql(w0, w1))[0]["n"])
+    if n != health.MINUTES:
+        raise RuntimeError(f"{health.MINUTELY_TABLE}: {n} rows in the window after the commit, wrote {health.MINUTES}")
+    out = {"window": [w0.isoformat(), w1.isoformat()], "rows": n, "events": sum(r[1] for r in rows),
+           "processed": sum(r[2] for r in rows)}  # fmt: skip
+    print(json.dumps(out), flush=True)
+    return out
+
+
+def health_path():
+    """web/data/health.json (/opt/dockwatch/web/data/health.json in the Airflow containers)."""
+    return alerts.data_dir().parent / "web" / "data" / "health.json"
+
+
+def health_export(**context) -> dict:
+    """web/data/health.json: the window read back from pipeline_minutely, silver's freshness, every existing
+    maintenance table's newest commit / files / partitions, the quality gate and dbt tests, the newest maintenance
+    run."""
+    execute = trino_execute()
+    w0, w1 = health_window(context)
+    rows = health.table_rows(execute(health.window_sql(w0, w1)))
+    last = execute(f"SELECT max(processed_ts) AS t FROM {health.SILVER}")[0]["t"]
+    existing = {r["t"] for r in execute(health.EXISTING_SQL)}
+    tables = [{"table": t, **execute(health.table_sql(t))[0]} for t in maintenance.ALL_TABLES if t in existing]
+    run = execute(health.NEWEST_RUN_SQL) if "metrics.maintenance_runs" in existing else []
+    gate_path = dbt_dir() / "quality_gate.json"
+    gate = json.loads(gate_path.read_text(encoding="utf-8")) if gate_path.is_file() else None
+    doc = health.health_doc(datetime.now(UTC), context["dag_run"].run_id, rows, last, tables, gate,
+                            health.dbt_tests(run_results()), run)  # fmt: skip
+    try:
+        size = health.write_health(health_path(), doc)
+    except health.HealthError as e:
+        fail(str(e))
+    out = {"bytes": size, "status": doc["status"]["overall"], "tiles": doc["tiles"]}
+    print(json.dumps(out), flush=True)
+    return out

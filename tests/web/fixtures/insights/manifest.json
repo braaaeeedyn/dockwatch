@@ -1,0 +1,39 @@
+{
+ "generated_at": "2026-10-15T11:51:42+00:00",
+ "format": 2,
+ "dag_run_id": "manual__2026-10-15T11:51:04+00:00",
+ "quality_gate": {
+  "passed": true,
+  "tests": 28,
+  "warnings": 0
+ },
+ "windows": {
+  "daily_service_dates": [
+   "2026-10-07",
+   "2026-10-15"
+  ],
+  "rebalancing_days": [
+   "2026-10-09",
+   "2026-10-15"
+  ],
+  "trip_months": [
+   "2025-10-01",
+   "2026-09-01"
+  ]
+ },
+ "source": "lake.marts (dbt on Trino; silver live data and bronze.trips Bay Wheels trip history)",
+ "files": {
+  "station_availability_daily": {
+   "rows": 5788,
+   "bytes": 272808
+  },
+  "rebalancing_need": {
+   "rows": 645,
+   "bytes": 66768
+  },
+  "trips_vs_availability": {
+   "rows": 15450,
+   "bytes": 514417
+  }
+ }
+}

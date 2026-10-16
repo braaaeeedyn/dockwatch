@@ -224,7 +224,9 @@ operations every time; `data/cdc/e2e-report.json`.)*
       commit; the 12-month backfill 2025-10 to 2026-09 loaded 5,789,432 rows, plus legacy 2019-01.)*
 - [x] DAG `iceberg_maintenance` (daily): `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`; logs
       file counts and sizes before/after into `metrics.maintenance_runs`. *(M4a: through Trino's `optimize`, on the
-      four streaming and five `ops.*` tables.)*
+      four streaming and five `ops.*` tables.)* *(Loop K: 16 tables, adding `bronze.trips` (one `trip_month`
+      partition per run), `bronze.station_information`, `metrics.trip_loads`, the three marts and
+      `metrics.pipeline_minutely`; a batch table that does not exist yet is `skipped`.)*
 - [x] dbt project (`dbt-trino` locally, `dbt-athena` on aws, one project with two targets):
       `mart_station_availability_daily`, `mart_rebalancing_need`, `mart_trips_vs_availability`, plus staging models
       and tests (`unique`, `not_null`, `accepted_values` for state, relationships to stations). *(M4b: dbt-core
@@ -268,18 +270,30 @@ path-casing guard. **M4b** (next): `trip_history_monthly`, the dbt project on th
       tolerance for disabled docks); uniqueness; freshness (`silver.station_status` updated < 5 min ago).
 - [ ] OpenLineage: Airflow provider + Spark listener → Marquez (`obs` profile). Screenshot of the graph from
       `gbfs.station_status` to each mart, saved to `docs/img/lineage.png`.
-- [ ] `metrics/`: `metrics.pipeline_minutely` (events/min, end-to-end latency p50/p95 = Iceberg commit time −
-      `last_reported`, consumer lag, files per partition) and an export to `web/data/health.json`.
+- [x] `metrics/`: `metrics.pipeline_minutely` (events/min, end-to-end latency p50/p95 = Iceberg commit time −
+      `last_reported`, consumer lag, files per partition) and an export to `web/data/health.json`. *(Loop K: DAG
+      `pipeline_health`, hourly; latency is `processed_ts − fetched_ts`; files and partitions per table are in
+      `health.json`'s freshness table.)*
 
 **Done when:** the pipeline page (F4b) shows real latency, lag, freshness and the latest GE results, and Marquez
 shows the full graph.
+
+| M5 decision | Why |
+|---|---|
+| Latency per minute is p50 / p95 of `processed_ts − fetched_ts` over the rows that landed in silver that minute (`approx_percentile`). | That is DockWatch's own path, fetch → Spark micro-batch. `last_reported` is the station's clock: stale stations are days old and would swamp the percentiles. |
+| Consumer lag = records with `kafka_ts` before a minute's end and `processed_ts` after it, from two running counts (by `kafka_ts` and by `greatest(kafka_ts, processed_ts)`). | Exact without assuming the broker's and Spark's clocks agree; records not in silver yet are invisible to the lake, and freshness covers that case. |
+| `pipeline_minutely` is written by pyiceberg in one transaction (delete minutes ≥ the window start, append 1,440 rows); Trino only runs GROUP BYs. | No big generated `VALUES` through Trino (Metaspace); a rerun replaces the window, no minute is ever doubled. |
+| `pipeline_health` runs on a restarted Trino after the full M4a + M4b sequence (`batch-stop` + `batch-up`); no limit or JVM change. | Trino sits at 1.8–2.0 GiB of its 2 GiB after that sequence. |
+| `iceberg_maintenance` covers the M4b and metrics tables (16), `bronze.trips` one month partition per run. | Rewriting all 13 months at once took Trino to 2,024 MiB; one partition keeps one `replace` commit per run. |
+| Great Expectations and OpenLineage → Marquez move to the next loop. | A new runtime inside the carried `marts_daily` gate, and five integration surfaces, did not fit Loop K's budget; Marquez will run on demand only, never beside Trino / Spark / Connect. |
 
 ### M6 · AWS target, CI/CD, measurements (week 8)
 - [ ] `terraform apply` (after the manual AWS steps in M0). Point `DOCKWATCH_TARGET=aws` at S3 + Glue; run the stream
       for a day; query with Athena.
 - [ ] Lambda + SNS wired to `gbfs.alerts` through a tiny consumer.
 - [x] GitHub Actions ci.yml: ruff, ruff format, pytest, Spark transform tests (Spark image), terraform fmt -check + validate, Playwright suite + repeat job, retries 0. (2026-10-08; first GitHub run checked after push)
-- [ ] ci.yml: dbt compile (when M5 adds dbt).
+- [x] ci.yml: dbt compile (when M5 adds dbt). *(Loop K: `python tasks.py dbt-compile`, offline with
+      `--no-populate-cache`, as one step after the host tests in the `Python lint + tests` job.)*
 - [ ] ci.yml: terraform plan via GitHub OIDC (needs the AWS account; no stored keys).
 - [ ] deploy.yml on main publishes web/ to S3 static hosting.
 - [ ] Measurements into `docs/METRICS.md` (each with the command that produced it):
@@ -335,15 +349,21 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
 - **Done when:** an alert raised by the stream appears within 2 minutes and resolves on its own.
 
 ### F4 · Insights (weeks 5–6) and F4b · Pipeline health (week 7)
-- [ ] Insights: KPI tiles; "% of time empty" heatmap (station × hour); rebalancing-need table; trips vs availability
-      scatter; each chart with a takeaway line and a source caption.
+- [x] Insights: KPI tiles; "% of time empty" heatmap (station × hour); rebalancing-need table; trips vs availability
+      scatter; each chart with a takeaway line and a source caption. *(Loop K: `insights.html` on insights format 2
+      from `marts_daily`; no period control, the marts fix the windows; `tests/web/insights.spec.js`.)*
 - [ ] Pipeline: status summary, latency p50/p95 line chart, events/min, consumer lag, freshness per table, GE results
-      table, compaction before/after, lineage screenshot.
+      table, compaction before/after, lineage screenshot. *(Loop K: `pipeline.html` on `health.json` has all of it
+      except the GE results (the dbt tests and quality gate are shown instead) and the lineage screenshot; not ticked
+      until those exist.)*
 - **Done when:** every chart reads from a JSON export produced by the pipeline, none hand-made.
 
 ### F5 · Polish and launch (week 8)
 - [ ] Playwright screenshots at 320/390/768/1024/1440/2560 px, both themes; axe; keyboard-only pass;
-      reduced-motion pass; Lighthouse ≥ 95 performance and 100 accessibility on the Live page.
+      reduced-motion pass; Lighthouse ≥ 95 performance and 100 accessibility on the Live page. *(Loop K:
+      `tests/web/launch.spec.js` does the 48 screenshots, the keyboard-only pass and the reduced-motion pass, and axe
+      runs on every page in both themes; Lighthouse is not run (it needs a new devDependency and belongs with the
+      deployed site), so not ticked.)*
 - [x] "Replay a day" mode for when the pipeline is off. *(2026-10-08: built early with the paused state:
       `python tasks.py replay-export` → `web/data/replay.json` from the raw archive, played at 10× from the
       paused banner; the file is refreshed by hand for now.)*

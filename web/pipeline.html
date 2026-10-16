@@ -19,6 +19,7 @@
     <link rel="stylesheet" href="css/base.css">
     <link rel="stylesheet" href="css/layout.css">
     <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/charts.css">
     <script type="module" src="js/pipeline.js"></script>
   </head>
   <body>
@@ -73,15 +74,150 @@
       </div>
     </dialog>
     <main id="content" class="container" tabindex="-1">
+      <template id="icon-ok"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" /></svg></template>
+      <template id="icon-warn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg></template>
+      <template id="icon-fail"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" /></svg></template>
       <header class="page-header">
         <h1>Pipeline</h1>
         <p class="lede">How healthy the data pipeline behind DockWatch is: latency, throughput, freshness and data quality.</p>
+        <a class="button-secondary" href="index.html" data-live-link>See live station status</a>
       </header>
-      <section class="card-soft empty-state" aria-labelledby="pipeline-empty">
-        <h2 id="pipeline-empty" class="eyebrow">Arrives with M5</h2>
-        <p>Pipeline health needs the metrics writer and its export, which arrive with milestone M5.</p>
-        <a class="button-secondary" href="index.html">See live station status</a>
-      </section>
+
+      <div class="chart-page" data-pipeline>
+        <section class="card-soft empty-state" data-pipeline-unpublished aria-labelledby="pipeline-unpublished" hidden>
+          <h2 id="pipeline-unpublished" class="eyebrow">Not published yet</h2>
+          <p>Pipeline health is not published yet. It appears after the hourly pipeline_health run has measured the lake.</p>
+          <a class="button-secondary" href="index.html">See live station status</a>
+        </section>
+
+        <section class="card-soft empty-state" data-pipeline-error aria-labelledby="pipeline-error" hidden>
+          <h2 id="pipeline-error" class="eyebrow">Couldn’t load pipeline health</h2>
+          <p role="status" data-pipeline-error-text></p>
+          <button type="button" class="button-secondary" data-pipeline-retry>Retry</button>
+        </section>
+
+        <div class="chart-page__content" data-pipeline-content>
+          <section class="card status-banner" data-status-banner aria-labelledby="status-title" aria-busy="true">
+            <h2 id="status-title" class="visually-hidden">Overall status</h2>
+            <p class="status-banner__overall" data-status-overall><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+            <ul class="status-list" data-status-components role="list"></ul>
+            <p class="caption" data-status-caption>Loading…</p>
+          </section>
+
+          <section class="kpis" aria-labelledby="pipeline-kpis-title" aria-busy="true">
+            <h2 id="pipeline-kpis-title" class="visually-hidden">Pipeline at a glance</h2>
+            <div class="kpi-grid">
+            <div class="stat-tile" data-kpi="latency">
+              <div class="stat-tile__head">
+                <h3 class="stat-tile__label eyebrow">p95 latency</h3>
+                <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-latency" aria-label="What “p95 latency” means">
+                  <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+                </button>
+              </div>
+              <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+              <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+              <p class="stat-tile__def" id="kpi-def-latency" hidden>The 95th percentile of fetch-to-silver time (fetched_ts to processed_ts) in the worst minute of the last hour in which data reached silver.</p>
+            </div>
+            <div class="stat-tile" data-kpi="events">
+              <div class="stat-tile__head">
+                <h3 class="stat-tile__label eyebrow">Events per minute</h3>
+                <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-events" aria-label="What “Events per minute” means">
+                  <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+                </button>
+              </div>
+              <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+              <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+              <p class="stat-tile__def" id="kpi-def-events" hidden>Station updates published to Kafka per minute, averaged over the last hour in which data reached silver.</p>
+            </div>
+            <div class="stat-tile" data-kpi="lag">
+              <div class="stat-tile__head">
+                <h3 class="stat-tile__label eyebrow">Consumer lag</h3>
+                <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-lag" aria-label="What “Consumer lag” means">
+                  <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+                </button>
+              </div>
+              <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+              <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+              <p class="stat-tile__def" id="kpi-def-lag" hidden>Records published to Kafka but not yet processed into silver at the end of the newest minute (as the lake sees it).</p>
+            </div>
+            <div class="stat-tile" data-kpi="freshness">
+              <div class="stat-tile__head">
+                <h3 class="stat-tile__label eyebrow">Freshness</h3>
+                <button type="button" class="icon-button stat-tile__info" data-kpi-info aria-expanded="false" aria-controls="kpi-def-freshness" aria-label="What “Freshness” means">
+                  <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+                </button>
+              </div>
+              <p class="stat-tile__value" data-kpi-value><span class="skeleton skeleton--stat" aria-hidden="true"></span></p>
+              <p class="stat-tile__sub" data-kpi-sub>Loading…</p>
+              <p class="stat-tile__def" id="kpi-def-freshness" hidden>Time from the newest row processed into silver to when this health file was written.</p>
+            </div>
+            </div>
+            <p class="caption" data-kpi-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="latency" aria-labelledby="latency-title" aria-busy="true">
+            <h2 id="latency-title" class="chart-card__title">Latency, fetch to silver</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <ul class="chart-legend" aria-label="Series">
+              <li><span class="chart-legend__line chart-legend__line--primary" aria-hidden="true"></span>p50</li>
+              <li><span class="chart-legend__line chart-legend__line--secondary" aria-hidden="true"></span>p95</li>
+              <li><span class="chart-legend__line chart-legend__line--threshold" aria-hidden="true"></span>5 min SLA</li>
+            </ul>
+            <div class="chart-box" data-chart-box>
+              <svg class="chart" role="img" aria-label="Latency chart: p50 and p95 seconds per minute with the 5 minute SLA line" xmlns="http://www.w3.org/2000/svg"></svg>
+              <div class="skeleton chart-skeleton" aria-hidden="true"></div>
+            </div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="events" aria-labelledby="events-title" aria-busy="true">
+            <h2 id="events-title" class="chart-card__title">Events per minute</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <div class="chart-box" data-chart-box>
+              <svg class="chart" role="img" aria-label="Events per minute over the last 24 hours" xmlns="http://www.w3.org/2000/svg"></svg>
+              <div class="skeleton chart-skeleton" aria-hidden="true"></div>
+            </div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="freshness" aria-labelledby="freshness-title" aria-busy="true">
+            <h2 id="freshness-title" class="chart-card__title">Freshness per table</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <div class="table-wrap" tabindex="0" role="region" aria-labelledby="freshness-title">
+              <table class="data-table data-table--plain">
+                <caption class="visually-hidden">Every lake table with its newest commit, age, data files and freshness status</caption>
+                <thead><tr><th scope="col">Table</th><th scope="col">Last commit</th><th scope="col">Age</th><th scope="col" class="num">Files</th><th scope="col">Status</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div class="skeleton chart-skeleton chart-skeleton--table" aria-hidden="true"></div>
+            </div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="quality" aria-labelledby="quality-title" aria-busy="true">
+            <h2 id="quality-title" class="chart-card__title">Data quality</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <p class="quality-gate" data-gate></p>
+            <div class="table-wrap" tabindex="0" role="region" aria-labelledby="quality-title">
+              <table class="data-table data-table--plain">
+                <caption class="visually-hidden">Every dbt test of the latest marts_daily build and its result</caption>
+                <thead><tr><th scope="col">dbt test</th><th scope="col">Result</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div class="skeleton chart-skeleton chart-skeleton--table" aria-hidden="true"></div>
+            </div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+
+          <section class="card chart-card" data-chart="compaction" aria-labelledby="compaction-title" aria-busy="true">
+            <h2 id="compaction-title" class="chart-card__title">Compaction</h2>
+            <p class="chart-card__takeaway" data-takeaway>Loading…</p>
+            <ul class="bars" data-bars role="list"></ul>
+            <div class="skeleton chart-skeleton" aria-hidden="true"></div>
+            <p class="caption" data-caption>Loading…</p>
+          </section>
+        </div>
+      </div>
     </main>
     <footer class="site-footer">
       <div class="container site-footer__inner">

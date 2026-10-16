@@ -365,3 +365,53 @@ Metaspace. Now Python reads the CSV and pyiceberg writes Iceberg directly, so th
 **Sensor.** A sensor is an Airflow task that waits for a condition instead of doing work. `published` checks the
 Bay Wheels listing until the month's ZIP exists. Lyft publishes around the 5th, while the scheduled run for a month
 fires on the 1st of the next one. In `reschedule` mode the sensor frees its worker slot between checks.
+
+## Data for a static page: lookup tables, size budgets, compaction in steps (Loop K)
+
+**Lookup table (normalisation).** The first insights files repeated each station's 36-character id, its name and
+the file's time window on every row: 24 rows per station in the station × hour file. Format 2 stores each station
+once in a `stations` lookup and makes a row start with the station's *index* into it, the way a fact table points at
+a dimension by key. The same goes for values that are equal on every row of a file (the trip months, the 7-day
+window): they move to one `window` header. The daily file also turns its date column into an index into
+`window.service_dates`. Nothing is lost; the page (and the host test) rebuild each original row by joining the
+row with its lookup entries.
+
+**Size budget.** A static site sends its data files whole to every visitor, so each file gets a byte budget
+(2,000,000 B for an insights file), and the export refuses to write anything when a file would be over it. A budget
+only helps if it is tested at the size the data will reach, not today's: the host test builds synthetic marts with
+1,000 stations and 30 dates, every real column and full-precision floats, and runs the real export. The old layout
+fails that test; format 2 passes it with 16 % to spare.
+
+**Freshness of a published file.** Each insights file carries `generated_at` and the windows it covers, and the page
+prints those windows under every chart. A visitor can tell how old a number is without knowing when the DAG last
+ran.
+
+**Compaction in steps.** Rewriting small files (compaction) needs memory in proportion to what is rewritten at once.
+Trino's `optimize` on all 13 months of `bronze.trips` held every month's writer open and took Trino to 2,024 MiB of
+its 2 GiB limit. With an identity partition (`trip_month`), `optimize ... WHERE trip_month = DATE '...'` rewrites one
+month only, so the daily maintenance compacts the month with the most files and leaves the rest for later runs:
+bounded memory and one commit per run, at the cost of a few extra small files for a while.
+
+## Pipeline health: percentiles, consumer lag, freshness (Loop K)
+
+**Latency percentiles.** A percentile says "this share of records was at most this fast". `pipeline_health` measures,
+for every record that landed in silver in a minute, `processed_ts - fetched_ts`: from the producer fetching the
+station to Spark writing it. The p50 (median) is the typical record and the p95 is the slow tail: 95 % of records
+took at most that long. An average would hide the tail, and the tail is what a 5-minute SLA is about. Trino's
+`approx_percentile` keeps a small summary instead of sorting every value, which is why the numbers can differ in the
+last digit between two runs.
+
+**Consumer lag.** Kafka keeps records until consumers read them, and lag is how far a consumer is behind the newest
+record. Kafka can report it per partition as offsets; DockWatch measures it from the lake instead: at the end of
+each minute, the records Kafka had already stored (`kafka_ts` before that moment) that were not in silver yet
+(`processed_ts` after it). It is computed from two running counts, published so far minus done so far, so it needs
+no assumption that the broker's clock and Spark's agree. Records that were never processed are invisible this way.
+
+**Freshness.** Freshness is the age of the newest data: here, the time between the newest row reaching silver and the
+moment `health.json` was written. It is the honest number when nothing runs at all, when latency and lag have no
+rows to measure. The stream counts as healthy within 5 minutes (the site's own Paused threshold) and degraded within
+a day; batch tables are healthy within 48 hours.
+
+**Worst-of status.** The overall status is the worst of its parts (stream, data quality, maintenance), so one red part
+is never averaged away by two green ones. Each part says why in words, and the page shows an icon and a word next to
+the colour, never colour alone.

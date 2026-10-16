@@ -1356,3 +1356,200 @@ characters, so it needs `# noqa: E501  # fmt: skip` for `ruff` and `ruff format`
 - The concurrent-run refusal in `dag-test`.
 - **Leftovers:** the orphan files of the first broken `bronze.trips`, plus Loop I's `hive-metastore/` and
   `raw/trips/` objects, are still in SeaweedFS. Nothing reads them.
+
+## 2026-10-15 · Loop K · insights format 2, the Insights page, 16 maintenance tables, `dbt compile` in CI
+
+Loop K builds everything that needs no user action, in value order, over up to five iterations. Iteration 1 (this
+entry) does the time bomb and the small items; iteration 2 is planned for pipeline health, the Pipeline page and the
+launch tests.
+
+**Plan decisions (D1–D9) and what was cut:**
+- **D1 insights format 2:** each insights file gets a `stations` lookup, a `window` header and compact rows, so every
+  file stays far under its 2,000,000-byte budget at 30 dates and 1,000 stations. Built (below).
+- **D2 the F4 Insights page** on format 2, with a Playwright spec and real fixtures. Built (below). The period
+  control (7 d / 30 d / 12 mo) is skipped: the marts fix the windows (DESIGN_BACKLOG #52).
+- **D3 `dbt compile` in CI** through a `tasks.py` task, offline. Built (below).
+- **D4 `iceberg_maintenance` on the M4b / metrics tables** (9 → 16), with a spike first and a fallback for
+  `bronze.trips`. Built (below); the fallback was needed.
+- **D5–D8, planned for iteration 2:** DAG `pipeline_health` → `lake.metrics.pipeline_minutely` (per minute: events
+  by `kafka_ts`, processed by `processed_ts`, p50 / p95 of `processed_ts - fetched_ts`, consumer lag = records
+  published but not yet in silver) and `web/data/health.json`; Trino restarted (`batch-stop` + `batch-up`) before it
+  instead of any limit change; the F4b page `pipeline.html`; F5 launch tests (screenshots at 6 widths × 2 themes,
+  keyboard-only order, reduced motion). **D9:** `prepare()` routes the new data files to real fixtures.
+- **Cut from Loop K (not blocked on the user):** Great Expectations suites (a new runtime inside the gate of the
+  carried `marts_daily` checks), OpenLineage + Marquez (Marquez on demand only, refused beside Trino / Spark /
+  Connect; five new integration surfaces), and Lighthouse (a new npm devDependency; it belongs with the deployed
+  site). They wait for the next loop.
+
+**Insights format 2 (`marts.insights_v2`, `marts_export`):**
+- **Why:** a station × hour row repeated a 36-character UUID, the station name, the region and three window values.
+  At ~107 KB per date the daily file would have passed 2,000,000 bytes at about 18 dates, and `export` would have
+  failed (Loop J's Known gap).
+- **Shape:** `{format: 2, generated_at, source, window, stations: {columns: [station_id, name, region_id], rows},
+  columns: [station, ...], rows}`. The row's `station` is an index into `stations.rows`.
+  - The per-file constants (`window_first_day` / `window_last_day`, `trip_days`, `trip_first_month` /
+    `trip_last_month`) move to `window`. A window column that is not constant fails the export rather than losing
+    data.
+  - `first_window` / `last_window` are dropped.
+  - `manifest.json` gains `"format": 2`. `export_insights` keeps its exact behaviour for `(columns, rows)` tables
+    (`tests/test_marts.py` unchanged) and merges an optional third element into the document.
+- **The daily file's dates are an index too.** With ISO dates in the rows, the synthetic 1,000 stations × 30 dates
+  (every float at full 3 digits) came to 1,981,370 B, 1 % under the budget. With `service_date` as an index into
+  `window.service_dates` it is 1,671,692 B. That is the plan's "date index" shrink.
+- **Real export** (`dag-test marts_daily`, 645 stations, 9 service dates): 973,010 / 79,694 / 1,886,746 B before,
+  **272,808 / 66,768 / 514,417 B** after (daily / rebalancing / trips). Projected at 1,000 stations and 30 dates:
+  daily ~1.26 MB, trips ~0.80 MB.
+- **Tests** (`tests/test_insights.py`, through the real `marts_export` task with Trino faked): the columns move out of
+  the rows, every file decodes back to the mart rows, and the 1,000-station, 30-date marts fit the budget while the
+  old layout does not.
+
+**The Insights page (`insights.html`, `js/insights.js`, `js/insights/model.js`, `js/charts.js`, `css/charts.css`):**
+- **KPI tiles:** Time empty and Time full (Σ minutes ÷ Σ coverage minutes over the daily file: 7.4 % and 2.2 % in
+  the fixture), Worst hour (1–2 PM, 9.9 % of the time empty on average) and Trips per day (13,856).
+- **Heatmap:** % of time empty, the 25 stations empty most often × 24 Pacific hours. It is a table with the
+  rounded % as text in each cell and a labelled `seq-empty` scale, and it scrolls inside a focusable region.
+  - **Contrast:** axe failed white text on `seq-empty-4` (#d55e00 gives 3.9:1, not the 4.9:1 I had estimated).
+    That step now takes dark text in both themes (4.8:1 with ink in light, 4.9:1 with on-ink in dark).
+- **Rebalancing table:** need ranks 1–20 of the last 7 days.
+- **Trips vs availability scatter:** one point per station, `role="img"` with a summary. The takeaway compares the
+  busiest and the quietest quarter of stations (9.9 % vs 7.1 % of the time empty).
+- **States:** skeletons with `aria-busy`; a 404 shows the "not published yet" card with a link to Live; any other
+  failure, or a read with no full answer after 10 s, shows a message with Retry. `readJson` now attaches the HTTP
+  status to its error.
+- **Tests:** `tests/web/insights.spec.js` has 8 tests. It recomputes every number from the real fixture (a copy of
+  this run's format-2 export in `tests/web/fixtures/insights/`), and checks the not-published, error and
+  never-answers states and axe in both themes. `prepare()` in `helpers.js` serves those fixtures by default
+  (additive edit).
+- **Carried specs:** the touch-target scan still finds exactly one "See live station status" link on Insights, so
+  the page header keeps that link (hidden only while the not-published card shows its own). The shell axe test now
+  covers the page with data and took 35 s.
+
+**`dbt compile` in CI:**
+- **Task:** `python tasks.py dbt-compile` runs `uv run --no-project --python 3.12 --with-requirements
+  infra/airflow/dbt-requirements.txt dbt compile --no-populate-cache --target local`, with
+  `DBT_SEND_ANONYMOUS_USAGE_STATS=false`.
+- **Result:** 7 models and 28 tests compile with no Trino, in ~8 s with uv's cache.
+- **Plan-time fact:** without `--no-populate-cache`, dbt connects to the (unresolvable) host `trino` to list
+  schemas.
+- **Path fix:** dbt resolves a relative `--target-path` against the project dir. The first run wrote
+  `dbt/dockwatch/data/...`, so the task passes an absolute `data/dbt-compile/target` (the log path stays relative to
+  the working dir).
+- **ci.yml:** one new step after `uv run pytest -q` in the `Python lint + tests` job, named "dbt compile (offline, no
+  Trino)". No new job.
+
+**`iceberg_maintenance` on 16 tables (`maintenance.BATCH_TABLES`, `ALL_TABLES`):**
+- **Tables added:** `bronze.trips`, `bronze.station_information`, `metrics.trip_loads`, the three marts and
+  `metrics.pipeline_minutely`. `maintenance.TABLES` (the 9) is unchanged.
+- **Missing tables:** a batch table that does not exist yet gets a `skipped` row (probe: `information_schema.tables`)
+  and does not fail `record`. A missing core table still fails as before. `metrics.maintenance_runs` is left out,
+  because the run writes it after measuring.
+- **Spike 1** (fresh Trino, whole-table `optimize`):
+  - success in 48 s;
+  - `bronze.trips` 64 → 13 files, 230 → 179 MB, 485 → 1 snapshots, 16.2 s;
+  - `metrics.trip_loads` 90 → 1 files (2.9 s); the marts and `bronze.station_information` lost their old snapshots
+    (16 → 2, 9 → 1);
+  - `pipeline_minutely` `skipped`.
+  - **Trino peaked at 2,024 MiB** of its 2 GiB limit, over the plan's 1,950 MiB line, so the fallback applies.
+- **Spike 2** (restarted Trino, nothing left to compact): 1,273 MiB. The peak came from rewriting all 13 months at
+  once.
+- **Fallback:** identity-partitioned tables (`maintenance.IDENTITY_PARTITIONS = {"bronze.trips": "trip_month"}`)
+  optimize **one partition per run**, the one with the most files (`$partitions`, `file_count > 1`), with
+  `... EXECUTE optimize(...) WHERE trip_month = DATE '...'`. When every partition has one file there is no optimize
+  at all.
+  - It is one partition per *run*, not one statement per partition. Each optimize is a commit, and the carried
+    per-table rule allows at most one `replace` commit per table per run. So a 12-month reload is compacted over
+    the next 13 daily runs.
+- **Verified:**
+  - `dag-test trip_history_monthly month=2026-09` left that month with 7 files.
+  - Then a fresh `batch-up` and `dag-test iceberg_maintenance`: only `trip_month = 2026-09` was optimized (7 → 1,
+    19 → 13 files overall), success in 36 s, **Trino 1,726 MiB**.
+  - `check_h maintenance` and `check_k maintenance` pass.
+- **Metaspace:** after that maintenance run and `marts_daily` in the same JVM, Trino's Metaspace was 186.7 / 191.9
+  MiB used / committed of 256 (64.1 MiB headroom). After spike 1 alone it was 178.2 / 181.6. The full carried
+  sequence (with the 12-month backfill) was not re-run this iteration. Trino was left stopped (`batch-stop`).
+
+**Tests:**
+- **Host:** 122 pass, 5 skipped. New: `tests/test_insights.py` 3 and `tests/test_maintenance_batch.py` 4; the new
+  Airflow module skips on the host.
+- **Airflow image:** 13 pass, with `tests/airflow/test_loopk_dags.py`: the maintenance DAG maps over the 16 tables.
+- **Playwright:** 57 tests in total.
+
+## 2026-10-15 · Loop K · pipeline health, the Pipeline page and the launch tests (Phase 2, same iteration)
+
+Phase 1 passed the whole `checks.json` first (all 167 ran; the only non-zero exits were `accept-replay-real`, a
+data gap, and the Phase 2 `accept-k-*` checks). Then Phase 2 was built in the same iteration.
+
+**`pipeline_health` (`src/dockwatch/batch/health.py`, `airflow/dags/pipeline_health.py`):**
+- **DAG:** `guard` → `minutely` → `export`, `@hourly`, `catchup=False`, paused at creation, the shared
+  `default_args`, an `sla` on `export`. `guard.TRINO_TASKS` gains `"pipeline_health"`, so it is refused beside a
+  Spark JVM or Kafka Connect.
+- **The window:** the 1,440 minutes before the run's start minute.
+- **Four GROUP BYs on `lake.silver.station_status`:**
+  - events by minute of `kafka_ts`;
+  - processed by minute of `processed_ts`, with `approx_percentile` p50 / p95 of `processed_ts - fetched_ts`;
+  - two lag counts over the rows processed since the window start, one by minute of `kafka_ts` and one by minute
+    of `greatest(kafka_ts, processed_ts)`.
+- **Consumer lag:** the difference of the two running counts, i.e. records published before a minute's end and
+  not yet in silver. It is exact, with no assumption that the broker's clock and Spark's agree. (A plain
+  "events minus processed" running sum would drift with clock skew.)
+- **The write:** the series is assembled in Python and written to `lake.metrics.pipeline_minutely` by pyiceberg in
+  one transaction (delete minutes ≥ the window start, append). There is no big generated `VALUES` through Trino.
+  It is counted back through Trino (1,440 rows).
+- **`export`:** writes `web/data/health.json` (format 1). It holds the status (stream / quality / maintenance and
+  their worst), the tiles of the last active hour, the minute series, every existing maintenance table's newest
+  non-`replace` commit with files and partitions, the quality gate with the dbt tests, and the newest maintenance
+  run's files before and after. The file must stay ≤ 500,000 bytes and is written atomically.
+- **Real runs** (fresh Trino, as `accept-k-health` does with `batch-stop` + `batch-up`):
+  - success in 24.8 s and 19.9 s, `health.json` 78,862 B;
+  - Trino peaked at 1,086 / 1,374 MiB and `airflow-cli` at 406 / 351 MiB;
+  - Metaspace afterwards was 168.6 / 172.8 MiB used / committed;
+  - `check_k health` passed both times. Its independent recomputation of the sampled minutes on silver matched,
+    and the rerun left no duplicate minute.
+- **What the data says:** Spark runs on demand, so only 5 of the 1,440 minutes processed anything. A catchup lands a
+  whole backlog at once, so p95 is the backlog's age: 3,299 s in the last active hour, and ~51 h for the first
+  catchup after the producer was down. Freshness was 662 s, so the stream is `warn` and the overall status is
+  Degraded. Both are true for an on-demand stream.
+- **Status details** are plain English ("newest row reached silver 11 min ago", "0 of 16 tables failed in the
+  newest run, finished 24 min ago") instead of ISO timestamps: an ISO string was the widest thing on the 320 px
+  page.
+- **Trino before `pipeline_health`:** in the full sequence Trino reached 1.8–2.0 GiB of 2 GiB, so it is restarted
+  first, not given more memory. `metric-j-trino-metaspace` after the full carried sequence (16-table maintenance,
+  evolution, trips 2019-01, the 12-month backfill, rerun, marts) was 187.9 / 194.3 MiB: under the 224 MiB line,
+  and lower than Loop J's 197.6.
+
+**The Pipeline page (`pipeline.html`, `js/pipeline.js`, `charts.js` `lineChart`, `charts.css`):**
+- **Status banner:** a badge with the Lucide `circle-check` / `triangle-alert` / `circle-x` icon and the word
+  Healthy / Degraded / Failing in the status colour, then the three component lines.
+- **Stat tiles:** p95 latency, events per minute, consumer lag and freshness.
+- **Charts:** latency (p50 solid, p95 dashed, the 5 min SLA line with its label, a legend) and events per minute.
+  A value with no neighbour is drawn as a dot; otherwise a single catchup minute would be invisible.
+- **Tables:** freshness per table with status badges, the quality gate with every dbt test, and the compaction
+  bars (files before / after, with the numbers as text).
+- **States** as on Insights. There is no lineage section; it arrives with OpenLineage / Marquez.
+- **Overflow at 320 px:** long table names in the compaction list widened the card (344 px page). They now wrap
+  (`overflow-wrap: anywhere`).
+- **Tests:** `tests/web/pipeline.spec.js` has 9 tests on a real `health.json` fixture (`tests/web/fixtures/health.json`,
+  a copy of the second run's file). `prepare()` serves it by default (additive edit).
+
+**Launch tests (`tests/web/launch.spec.js`, F5 without Lighthouse):**
+- **Screenshots:** 48 full-page screenshots (live / insights / pipeline / about × 320, 390, 768, 1024, 1440, 2560
+  px × light / dark) saved with `testInfo.outputPath`. Each page is checked for no horizontal scroll; there are no
+  pixel diffs.
+- **Keyboard:** Tab order equals the DOM reading order on every page (one stop per radio group, every visible
+  focusable). The nav overlay traps Tab and returns focus to its button on Escape.
+- **Reduced motion:** no animation runs after load or after a 60 s refresh.
+  - The first version caught a hover `background-color` transition mid-frame. Reduced motion makes every transition
+    0.01 ms (base.css), so the test now counts only animations longer than 1 ms.
+  - A scratch run without reduced motion shows the filter still catches the freshness pulse, so it is not vacuous.
+- **Timing:** the whole spec takes ~14 s.
+
+**Tests:**
+- **Host:** 127 pass, 5 skipped. `tests/test_health.py` has 5 tests: the series, the lag (with rows carried into the
+  window and a broker clock ahead of Spark's), the tiles, the status thresholds, and the document with its budget.
+- **Airflow image:** 15 pass.
+- **Playwright:** 69 tests in total. `insights`, `pipeline` and `launch` repeated 3× gave 60 of 60.
+
+**Memory note:** in the Phase 1 full run, the trips checks ran this time; at baseline their 1.5 GB memgate had blocked
+them. After the backfill, the `marts_daily` memgate read 1,527 MiB, just under 1,536, so my runner stopped there. I
+resumed it from `accept-i-marts`, and every later check passed. The gate is borderline on this host once the trips
+checks run.

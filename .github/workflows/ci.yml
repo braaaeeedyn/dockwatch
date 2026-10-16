@@ -29,6 +29,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
+      - name: dbt compile (offline, no Trino)
+        run: uv run python tasks.py dbt-compile
 
   spark:
     name: Spark transform tests

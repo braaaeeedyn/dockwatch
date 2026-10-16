@@ -14,6 +14,23 @@ CATALOG = "lake"
 STREAM_TABLES = ("bronze.station_status", "silver.station_status", "silver.availability_5m", "silver.station_episodes")
 OPS_TABLES = ("ops.stations", "ops.docks", "ops.vans", "ops.rebalancing_jobs", "ops.maintenance_tickets")
 TABLES = STREAM_TABLES + OPS_TABLES
+# Loop K: the M4b and metrics tables too. They may not exist yet (a fresh install, pipeline_minutely before its first
+# run): a missing batch table gets a `skipped` row. metrics.maintenance_runs is left out: the run writes it last.
+BATCH_TABLES = (
+    "bronze.trips",
+    "bronze.station_information",
+    "metrics.trip_loads",
+    "marts.mart_station_availability_daily",
+    "marts.mart_rebalancing_need",
+    "marts.mart_trips_vs_availability",
+    "metrics.pipeline_minutely",
+)
+ALL_TABLES = TABLES + BATCH_TABLES
+# Identity-partitioned tables are optimized one partition per run, the one with the most files: one optimize of all of
+# bronze.trips (13 months, 64 files, 230 MB) took Trino to 2,024 MiB of its 2 GiB limit (Loop K spike, 1,273 MiB
+# without it). One partition keeps the writers small and the run at one `replace` commit; a 12-month reload is
+# compacted over the next daily runs.
+IDENTITY_PARTITIONS = {"bronze.trips": "trip_month"}  # table -> its DATE identity partition column
 METRICS_TABLE = f"{CATALOG}.metrics.maintenance_runs"
 MIN_RETENTION_S = 86400
 
@@ -128,6 +145,29 @@ def measure_sql(table: str) -> str:
     )
 
 
+def exists_sql(table: str) -> str:
+    ns, name = qualified(table).split(".")[1:]
+    return (
+        f"SELECT count(*) AS n FROM {CATALOG}.information_schema.tables "
+        f"WHERE table_schema = '{ns}' AND table_name = '{name}'"
+    )
+
+
+def busiest_partition_sql(table: str) -> str:
+    """The identity partition of `table` with the most data files, if any has more than one."""
+    column = IDENTITY_PARTITIONS[table]
+    return (
+        f"SELECT CAST(partition.{column} AS varchar) AS value, file_count FROM {meta(table, 'partitions')} "
+        "WHERE file_count > 1 ORDER BY file_count DESC, 1 LIMIT 1"
+    )
+
+
+def optimize_partition_sql(optimize: str, table: str, value: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)):
+        raise MaintenanceError(f"{table}: unexpected partition value {value!r}")
+    return f"{optimize} WHERE {IDENTITY_PARTITIONS[table]} = DATE '{value}'"
+
+
 def measure(execute: Execute, table: str) -> Measure:
     r = execute(measure_sql(table))[0]
     return Measure(
@@ -224,12 +264,21 @@ def orphan_count(result: list[dict]) -> int | None:
 
 def maintain(execute: Execute, run_id: str, table: str, params: dict | None = None, now=None) -> dict:
     """Run the four steps on one table and return its row. Raises MaintenanceError (row attached) on a changed
-    row count; other errors propagate (the DAG task records them as status='error')."""
+    row count; other errors propagate (the DAG task records them as status='error'). A BATCH_TABLES table that does
+    not exist yet returns a `skipped` row; a missing core table fails as before (measure raises). An
+    IDENTITY_PARTITIONS table optimizes only its partition with the most files (none if every partition has one)."""
     clock = now or (lambda: datetime.now(UTC))
     sql = statements(table, params)
     started = clock()
+    if table in BATCH_TABLES and not int(execute(exists_sql(table))[0]["n"]):
+        return {**row(run_id, table, started, clock(), None, None), "status": "skipped"}
     before = measure(execute, table)
-    execute(sql[0])
+    if table in IDENTITY_PARTITIONS:
+        busiest = execute(busiest_partition_sql(table))
+        if busiest:
+            execute(optimize_partition_sql(sql[0], table, busiest[0]["value"]))
+    else:
+        execute(sql[0])
     execute(sql[1])
     orphans = orphan_count(execute(sql[2]))
     after = measure(execute, table)

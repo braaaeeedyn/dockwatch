@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { basename } from "node:path";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -22,11 +23,17 @@ export const GENERATED_AT_MS = Date.parse(LIVE.generated_at);
 
 export const REPLAY_FIXTURE = join(FIXTURES, "replay.json");
 
+// One real format-2 insights export (dag-test marts_daily); data/insights/*.json is never read from web/data/.
+export const INSIGHTS_FIXTURES = join(FIXTURES, "insights");
+
 /**
  * Route data/live.json and data/alerts.json to the fixtures (optionally a modified live.json) and fake the clock
  * so the page thinks `ageMs` has passed since the fixture's generated_at.
  * data/replay.json is never read from web/data/: by default it is "not published" (404); `replay: true` serves
  * tests/web/fixtures/replay.json, and `replay: <number>` answers with that HTTP status.
+ * data/insights/<file>.json is served from tests/web/fixtures/insights/ (a test that needs a 404, 500 or no answer
+ * routes it again after prepare(): the newest route wins).
+ * data/health.json is served from tests/web/fixtures/health.json (one real pipeline_health export), the same way.
  */
 export async function prepare(page, { ageMs = 30_000, live = LIVE, replay = false } = {}) {
   watchPage(page);
@@ -40,6 +47,16 @@ export async function prepare(page, { ageMs = 30_000, live = LIVE, replay = fals
     replay === true
       ? route.fulfill({ status: 200, contentType: "application/json", path: REPLAY_FIXTURE })
       : route.fulfill({ status: typeof replay === "number" ? replay : 404, body: "" }),
+  );
+  await page.route("**/data/insights/*.json", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      path: join(INSIGHTS_FIXTURES, basename(new URL(route.request().url()).pathname)),
+    }),
+  );
+  await page.route("**/data/health.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", path: join(FIXTURES, "health.json") }),
   );
   await page.clock.install({ time: Date.parse(live.generated_at) + ageMs });
 }

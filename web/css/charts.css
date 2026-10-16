@@ -1,0 +1,402 @@
+/* Chart cards, the heatmap and SVG charts (DESIGN.md §2 "Data: heatmaps and charts", §7 chart card). Used by
+   insights.html and pipeline.html. No chart borders, horizontal gridlines only; status colours only in the
+   Pipeline page's status badges. */
+
+/* Cards that toggle with `hidden` keep their own display otherwise (.empty-state is a grid). */
+main [hidden] {
+  display: none !important;
+}
+
+.page-header > .button-secondary {
+  justify-self: start;
+}
+
+.chart-page,
+.chart-page__content {
+  display: grid;
+  gap: var(--space-3xl);
+  min-width: 0;
+}
+
+/* ---- Chart card: title, takeaway, chart, source caption ---- */
+.chart-card {
+  container-type: inline-size;
+  display: grid;
+  align-content: start;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.chart-card__title {
+  font-size: var(--fs-display-md);
+  line-height: 1.35;
+}
+
+.chart-card__takeaway {
+  color: var(--body);
+}
+
+.chart-card .table-wrap {
+  max-height: none; /* 25 heatmap rows / 20 ranks: shown in full, scrolling sideways only */
+}
+
+.chart-skeleton {
+  min-height: 260px;
+}
+
+.chart-skeleton--table {
+  min-height: 20rem;
+}
+
+.chart-card.is-ready .chart-skeleton,
+.chart-card:not(.is-ready) .chart {
+  display: none;
+}
+
+/* ---- SVG charts (charts.js draws them at the container's pixel width) ---- */
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.chart__grid line {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+
+.chart__tick,
+.chart__axis-label {
+  fill: var(--mute);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart__points circle {
+  fill: var(--series-primary);
+  fill-opacity: 0.45;
+}
+
+/* ---- Heatmap scale: the five seq-empty steps with their bucket edges ---- */
+.scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-body-sm);
+  color: var(--body);
+}
+
+.scale li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.scale__swatch {
+  width: 20px;
+  height: 12px;
+  border: 1px solid var(--hairline);
+}
+
+/* ---- Heatmap: station x hour table, scrolls inside its card, station column sticky ---- */
+/* Cell text: ink on the light steps, on-ink on the strong ones, each >= 4.5:1 (seq-empty-4 #d55e00 takes dark text
+   in both themes: 4.8:1 with ink in light, 4.9:1 with on-ink in dark; white or dark-theme ink would be < 4). */
+:root {
+  --heat-text-4: var(--ink);
+}
+
+:root[data-theme="dark"] {
+  --heat-text-4: var(--on-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --heat-text-4: var(--on-ink);
+  }
+}
+
+.heatmap {
+  border-collapse: separate;
+  border-spacing: 2px;
+  font-size: var(--fs-caption);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.heatmap th,
+.heatmap td {
+  padding: 0;
+}
+
+.heatmap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-width: 2rem;
+  padding-block: var(--space-xs);
+  background: var(--canvas);
+  color: var(--mute);
+  font-weight: 500;
+  text-align: center;
+}
+
+.heatmap tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 9rem;
+  max-width: 13rem;
+  padding-inline: var(--space-sm);
+  background: var(--canvas);
+  font-size: var(--fs-body-sm);
+  font-weight: 400;
+  text-align: left;
+}
+
+.heatmap thead th:first-child {
+  left: 0;
+  z-index: 3;
+  padding-inline: var(--space-sm);
+  text-align: left;
+}
+
+.heatmap td {
+  min-width: 2rem;
+  height: 2rem;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: center;
+}
+
+.heatmap td[data-bucket="1"] {
+  background: var(--seq-empty-1);
+}
+
+.heatmap td[data-bucket="2"] {
+  background: var(--seq-empty-2);
+}
+
+.heatmap td[data-bucket="3"] {
+  background: var(--seq-empty-3);
+}
+
+.heatmap td[data-bucket="4"] {
+  background: var(--seq-empty-4);
+  color: var(--heat-text-4);
+}
+
+.heatmap td[data-bucket="5"] {
+  background: var(--seq-empty-5);
+  color: var(--on-ink);
+}
+
+.scale__swatch[data-bucket="1"] {
+  background: var(--seq-empty-1);
+}
+
+.scale__swatch[data-bucket="2"] {
+  background: var(--seq-empty-2);
+}
+
+.scale__swatch[data-bucket="3"] {
+  background: var(--seq-empty-3);
+}
+
+.scale__swatch[data-bucket="4"] {
+  background: var(--seq-empty-4);
+}
+
+.scale__swatch[data-bucket="5"] {
+  background: var(--seq-empty-5);
+}
+
+/* ---- Plain data table (no sort buttons in the header) ---- */
+.data-table--plain thead th {
+  padding: var(--space-sm) var(--space-md);
+}
+
+/* ---- Line charts (Pipeline): series-primary solid 2 px, series-secondary dashed 4 3, threshold dashed 2 2 ---- */
+.chart__line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.chart__line--primary {
+  stroke: var(--series-primary);
+}
+
+.chart__line--secondary {
+  stroke: var(--series-secondary);
+  stroke-dasharray: 4 3;
+}
+
+/* A value with no neighbour (e.g. one on-demand catchup minute) has no line to draw: a dot shows it. */
+.chart__dot {
+  stroke: none;
+}
+
+.chart__dot.chart__line--primary {
+  fill: var(--series-primary);
+}
+
+.chart__dot.chart__line--secondary {
+  fill: var(--series-secondary);
+}
+
+.chart__threshold {
+  stroke: var(--threshold);
+  stroke-width: 1.5;
+  stroke-dasharray: 2 2;
+}
+
+.chart__threshold-label {
+  fill: var(--threshold);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-body-sm);
+  color: var(--body);
+}
+
+.chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.chart-legend__line {
+  width: 24px;
+  border-top: 2px solid var(--series-primary);
+}
+
+.chart-legend__line--secondary {
+  border-top: 2px dashed var(--series-secondary);
+}
+
+.chart-legend__line--threshold {
+  border-top: 2px dotted var(--threshold);
+}
+
+/* ---- Status badge (Pipeline only): Lucide icon + word in the status colour, never a fill ---- */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xxs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-badge .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.status-badge[data-status="ok"] {
+  color: var(--status-ok);
+}
+
+.status-badge[data-status="warn"] {
+  color: var(--status-warn);
+}
+
+.status-badge[data-status="fail"] {
+  color: var(--status-fail);
+}
+
+.status-banner {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.status-banner__overall {
+  font-size: var(--fs-display-md);
+  line-height: 1.35;
+}
+
+.status-banner__overall .status-badge .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.status-list {
+  display: grid;
+  gap: var(--space-sm);
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-body-sm);
+}
+
+.status-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-xxs) var(--space-md);
+}
+
+.status-list__name {
+  min-width: 8rem;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.status-list__detail {
+  color: var(--body);
+  overflow-wrap: anywhere;
+}
+
+.quality-gate {
+  font-size: var(--fs-body-sm);
+  color: var(--body);
+}
+
+/* ---- Compaction bars: files before (secondary) and after (primary) per table ---- */
+.bars {
+  display: grid;
+  gap: var(--space-md);
+  padding: 0;
+  list-style: none;
+}
+
+.bars__row {
+  display: grid;
+  gap: var(--space-xxs);
+  font-size: var(--fs-body-sm);
+}
+
+.bars__name {
+  color: var(--ink);
+  overflow-wrap: anywhere; /* long table names must not widen the card at 320 px */
+}
+
+.bars__bar {
+  display: block;
+  min-width: max-content;
+  width: calc(var(--share, 0) * 100%);
+  padding-inline-start: var(--space-xs);
+  border-inline-start: 4px solid var(--series-primary);
+  color: var(--body);
+}
+
+.bars__bar--before {
+  border-inline-start-color: var(--series-secondary);
+  background: var(--surface);
+}
+
+.bars__bar--after {
+  background: var(--surface-2);
+}
+
+.bars__note {
+  color: var(--mute);
+}
