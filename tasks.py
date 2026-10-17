@@ -285,6 +285,11 @@ TASKS = {
     "scheduler-up": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-up", *a),
     "scheduler-stop": lambda *a: uv("python", "-m", "dockwatch.batch", "scheduler-stop", *a),
     "trino-sql": lambda *a: uv("python", "-m", "dockwatch.batch", "trino-sql", *a),
+    # Loop M lineage: Marquez (profile obs, on demand) fed from data/lineage; never beside Trino, Spark or Connect.
+    "lineage-up": lambda *a: uv("python", "-m", "dockwatch.batch", "lineage-up", *a),
+    "lineage-replay": lambda *a: uv("python", "-m", "dockwatch.batch", "lineage-replay", *a),
+    "lineage-shot": lambda *a: uv("python", "-m", "dockwatch.batch", "lineage-shot", *a),
+    "lineage-stop": lambda *a: uv("python", "-m", "dockwatch.batch", "lineage-stop", *a),
     # dbt project compiled offline (no Trino; also a CI step in the python job)
     "dbt-compile": dbt_compile,
     "tf-validate": lambda *a: (terraform("init", "-backend=false", "-input=false"), terraform("validate")),

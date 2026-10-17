@@ -452,3 +452,42 @@ shown on the page as Passed / Warning / Failed.
 **A gate never passes silently.** If the expectation run crashes or leaves no usable results (another run's file, a
 missing expectation), the gate records `gx: no results (...)` and fails, exactly as if a blocking expectation had
 failed. A quality check that can disappear without anyone noticing is worse than none.
+
+## Lineage: jobs, runs, datasets, namespaces, facets, the file transport and the replay (Loop M)
+
+**Lineage** answers "where did this number come from, and what breaks if this table changes?". OpenLineage is an open
+standard for recording it as events, and Marquez is a server that stores the events and draws the graph.
+
+**Job, run, dataset.** A job is something that runs again and again: in DockWatch every Airflow task is a job named
+`<dag>.<task>` (`marts_daily.dbt_build`), and every DAG is a job too. A run is one execution of a job, with its own
+id: the 16 October `marts_daily` run is one run of the job `marts_daily`, and its `dbt_build` task is one run of
+`marts_daily.dbt_build`. A dataset is something a run reads or writes: a lake table, a file, an S3 prefix. Each run
+sends a START event and a COMPLETE (or FAIL) event naming its inputs and outputs, and the graph is just those edges:
+dataset → job → dataset, joined wherever one job's output is another's input.
+
+**Namespaces and names.** A dataset is identified by a namespace (where it lives) and a name (what it is called
+there), and two jobs only connect if they spell both the same way. DockWatch follows the OpenLineage conventions:
+lake tables as Trino sees them (namespace `trino://trino:8080`, name `lake.silver.station_status`), repository files
+by their repo path (namespace `file`, name `data/dbt/quality_gate.json`), and S3 by bucket and key
+(`s3://baywheels-data`, `tripdata`). Jobs live in the namespace `dockwatch`. Getting this right matters more than
+anything else: if Spark later names silver by its storage location instead, the graph splits in two at silver.
+
+**Facets.** Everything else an event carries is a facet: a small named JSON object with its own schema, attached to
+the run, the job or a dataset. The Airflow provider adds, for example, `parent` (which DAG run a task run belongs to),
+`airflow` (the DAG and task as Airflow sees them) and source-code facets. Each facet says who produced it and which
+schema it follows (`_producer`, `_schemaURL`); Marquez rejects an event whose facets lack them with a 422, which is
+why the replay sends the provider's events unchanged.
+
+**Manual inlets and outlets.** The provider knows what some operators read and write (an SQL operator can parse its
+query). A `PythonOperator` is opaque, so DockWatch declares each batch task's datasets itself: `lineage.annotate(dag)`
+sets the task's `inlets` and `outlets` to OpenLineage `Dataset` objects from one table in `batch/lineage.py`, and the
+provider copies them into the events. The type matters: Airflow's older `airflow.lineage.entities.Table` is silently
+ignored. dbt's lineage is declared the same way on the one task that runs dbt (every source in, every mart out),
+because the dbt integration would report the ephemeral staging models as tables that do not exist.
+
+**The file transport and the replay.** A transport is how events leave the producer: HTTP straight to Marquez, Kafka,
+or a file. DockWatch uses the file transport, one JSON file per event in `data/lineage/`, because Marquez is a JVM
+that must not run beside Trino, Spark or Connect, and the batch work runs exactly when those are up. Later, with
+the heavy services stopped, `lineage-up` starts an empty Marquez and `lineage-replay` sends it the events of the
+newest run of each DAG, in the order they happened. Recording first and loading later means Marquez never has to be
+up, never needs a volume, and can be rebuilt from the files in seconds.

@@ -1693,3 +1693,256 @@ loosened; it is the same borderline host the Loop K entry describes.
 **Cut, and why:** OpenLineage / Marquez and the Spark listener (Loops M and N, so F4b stays unticked: no lineage
 screenshot); the heatmap coverage rule itself (a design call, and `insights.spec.js` is frozen); a log or capped
 latency axis (#58, a design call); METRICS.md and Lighthouse (Loops O and P); any `mem_limit` or JVM change.
+
+## 2026-10-16 · Loop M · OpenLineage from Airflow into Marquez on demand, the batch lineage card
+
+**Goal:** the Airflow half of M5 OpenLineage: the provider already in the image switched on with the **file
+transport**, inlets / outlets on the batch tasks, Marquez on demand in a compose profile `obs` (never beside Trino,
+Spark or Connect), tasks to start, fill, screenshot and stop it, and a static Lineage card on the Pipeline page. The
+Spark listener and `docs/img/lineage.png` stay for Loop N, so M5 OpenLineage and F4b stay unticked.
+
+**Re-base of the carried guards:** Loop L is committed (2029cfa), so `check_l.py` was re-based like Loop L re-based
+`check_k.py`: its scope, its guard's DAG-file / compose / `src/dockwatch/batch` rules and its docs rules ("Done most
+recently / Before that", the IMPLEMENTATION_PLAN rules) now read 481c2e2..2029cfa; the Dockerfile-additive rule,
+`BUILD_INPUTS`, the frozen tests, `helpers.js` and the word rules still read the working tree. `check_g.py`'s compose
+rule now compares with Loop G's committed compose (0fbb659), since the obs services are new. `check_m.py` takes over
+the working tree with stricter rules (every service at 2029cfa unchanged except the Airflow services' three
+`AIRFLOW__OPENLINEAGE__*` keys, new services exactly the obs three, volumes unchanged). Ids, commands and kinds of
+every carried check are unchanged; 18 new checks (199 in total).
+
+**Plan-time facts (spikes, 2026-10-16):**
+- In the image: `apache-airflow-providers-openlineage` 2.11.0 and `openlineage-python` 1.44.1, off until now
+  (`AIRFLOW__OPENLINEAGE__DISABLED=true`). A `dags test` spike with the file transport and `append: false` wrote one
+  ~5–7 KB file per event: START + COMPLETE per task and the DAG's COMPLETE (`dags test` emits no DAG START). Task
+  events carry the DAG run in `run.facets.parent`; RSS 200 → 214–220 MiB, +0.8–2.3 s per run (one `fork` per task
+  event).
+- Only `openlineage.client.event_v2.Dataset` (or the compat `Table` / `File`) become datasets; Airflow's
+  `airflow.lineage.entities.Table` is silently ignored (the spike's first run had empty inputs).
+- The file transport never creates directories: a missing folder loses the event (logged only).
+- **openlineage-dbt cut:** 1.44.1 and the newest 1.54.0 take a model's inputs straight from dbt's `parent_map`
+  without resolving **ephemeral** models. DockWatch's four `stg_*` models are ephemeral, so each mart would read
+  phantom `lake.marts.stg_*` datasets nobody writes, and the graph from silver / bronze to the marts would break.
+  Instead `marts_daily.dbt_build` carries every dbt source as inlets and the marts as outlets; the dbt venv, the
+  Dockerfile and the image (3.86 GB) are unchanged.
+- **Marquez 0.51.1** (`marquezproject/marquez` and `marquez-web`, newest, 2025-03-27): the API answers ~6 s after its
+  db; 0.51's default `SEARCH_ENABLED=true` needs an OpenSearch JVM, so it is off. **Flyway** 8.5.13 warns that
+  Postgres 16 is newer than it supports but migrates cleanly. `POST /api/v1/lineage` answers 201; an event whose
+  facets lack `_producer` / `_schemaURL` gets a **422** (the provider's own events have them, so the replay sends
+  them unchanged).
+
+**What was built:**
+- **Compose:** the three Airflow services get `AIRFLOW__OPENLINEAGE__DISABLED: "false"`, namespace `dockwatch` and
+  `AIRFLOW__OPENLINEAGE__TRANSPORT` = `{"type": "file", "log_file_path": "/opt/dockwatch/data/lineage/ol",
+  "append": false}`, so every event is `data/lineage/ol-<time>.json`. The image's `ENV` still says disabled, so
+  `test-airflow` runs without it. New profile **`obs`**: `marquez-db` (`postgres:16-alpine`, 256m, `pg_isready`
+  healthcheck), `marquez-api` (`marquezproject/marquez:0.51.1`, `MARQUEZ_CONFIG=marquez.dev.yml`,
+  `SEARCH_ENABLED=false`, port 15000, 768m, JVM default heap) and `marquez-web` (port 13000, 256m); `restart: "no"`,
+  no volumes, no docker.sock. Marquez always starts empty.
+- **Guard both ways round** (`batch/guard.py`): `LINEAGE_TASKS = ("lineage-up",)` refuses beside `trino`,
+  `status-stream`, `cdc-apply` or `connect`, and every Trino, Spark / Connect and keepalive task refuses while
+  `marquez-api` runs, naming Marquez and `python tasks.py lineage-stop`. The old tuples and messages are unchanged.
+- **`batch/lineage.py`** (stdlib only): the table of what the 8 batch tasks read and write, named by the OpenLineage
+  conventions (Trino tables `trino://trino:8080` + `lake.<schema>.<table>`, repo files `file` + path, S3
+  `s3://<bucket>` + key); `annotate(dag)` sets each planned task's **inlets** / **outlets** to OpenLineage
+  `Dataset`s. The three DAG files changed by one import name and a last line `lineage.annotate(dag)`.
+  `marts_daily.quality_gate` reads `lake.silver.station_status` (the GE batch) and `silver.availability_5m` besides the
+  marts and `run_results.json`.
+- **Tasks:** `lineage-up` (refuse, remove old obs containers, db with `--wait`, then api + web, poll the API up to
+  180 s), `lineage-replay` (the **newest run** of each DAG: events grouped by DAG run, a task's from its `parent`
+  facet, a DAG's from itself; the run with the latest parsed `eventTime`; POSTed in time order; the first non-2xx or a
+  connection error exits 1 with the status, body and file, or "run lineage-up"), `lineage-shot` and `lineage-stop`
+  (`rm --stop --force --volumes` of the obs services only; idempotent). `batch_up()` and `airflow_db_up()` create
+  `data/lineage`.
+- **`lineage-shot`:** the Playwright CLI through `node node_modules/@playwright/test/cli.js` (not `npx`, which is
+  `npx.cmd` on Windows, where cmd.exe would mangle a quoted selector), 1600 × 1000, of
+  `/lineage/job/dockwatch/marts_daily.dbt_build?depth=2` (depth 2, 3 and 4 draw the same graph). It first waited for
+  an edge's `polyline` by id, which never became "visible": the edge from `trip_history_monthly.load` to
+  `lake.bronze.trips` is horizontal, so its box has zero height. It now waits for the `data/trips/zips` node label,
+  then 3 s. The PNG is 98,181 B.
+- **Pipeline page:** a static Lineage card after compaction (no `aria-busy`, no JS change): a takeaway, the screenshot
+  in a `<figure>` with its real `width` / `height`, an alt text and a caption, then the same graph as a table (Job,
+  Reads, Writes), the text alternative. Marquez web has one dark theme and truncates long labels (DESIGN_BACKLOG #63).
+
+**Measured (Builder spike, real data, OpenLineage on, each DAG on a freshly restarted Trino):**
+- `trip_history_monthly month=2026-09`: 30.9 s, `airflow-cli` peak 576 MiB, Trino 959 MiB, 9 events.
+- `marts_daily`: 43.2 s (Loop L 44.0 s), `airflow-cli` peak **606 MiB** (Loop L 618 MiB), Trino 1,748 MiB, 11 events.
+- `pipeline_health`: 25.7 s, `airflow-cli` peak 426 MiB (Loop L 378 MiB), Trino 1,114 MiB, 7 events.
+- All far under the plan's 900 MiB stop line; Trino unchanged (OpenLineage runs in the Airflow processes).
+- `lineage-up` took 10.5 s. After `lineage-replay` (27 events, 15 jobs): **`marquez-api`** 262 MiB (of 768),
+  `marquez-db` 74 MiB, `marquez-web` 39 MiB (5 s sampler peaks). `data/lineage`: 27 files, 202,137 B.
+- This loop's baseline saw Trino at 2,022 of 2,048 MiB on the first JVM (maintenance, partition evolution and the
+  trips stages), above the 1,950 MiB flag line, before any Loop M change; recorded and flagged, no limit change.
+
+**Loop L's Checker numbers** (carried over from Loop L's final review): `marts_daily` 44.0 s on a fresh Trino, Trino
+**1,768** MiB in the DAG and 1,858–**1,885** MiB with the checks' recomputation queries right after it, `airflow-cli`
+**618** MiB, Great Expectations **3.2 s** on **382,254** rows (freshness warned at 2,001 s), `pipeline_health`
+`airflow-cli` 378 MiB. CURRENT_STATE's `marts_daily` range is now "1,694–1,768 MiB in the DAG, up to 1,885 MiB with
+the checks' queries".
+
+**Tests:** `tests/test_lineage.py` (6 host tests: naming, the quality gate's inputs, the newest-run replay rule
+across UTC offsets, posting and failing loudly on a refused connection and a 422, the guard both ways round, the
+lineage tasks' compose calls and `data/lineage`), `tests/airflow/test_loopm_lineage.py` (3 in the image: the
+datasets through the provider's `ExtractorManager.convert_to_ol_dataset`, `dbt_build` against `dbt/dockwatch`, every
+DAG parsing and round-tripping through `SerializedDAG` with the listener registered),
+`tests/web/pipeline-lineage.spec.js` (4 Playwright tests). Host 139 pass, 7 skipped; Airflow image 21; Playwright 78.
+
+## 2026-10-16 · Loop M2 · Loop M finished: a lost OpenLineage event and a nav overlay race fixed at the root
+
+**Why a Loop M2:** Loop M's Checker run (iteration 1, uncommitted) ended in **STOP_REGRESSION** on two checks:
+`accept-ci-linux-web` (`touch-targets.spec.js:297`, the nav overlay at 390 px: "DockWatch" and "Close menu" had
+"nothing pressable" at their top edge) and `accept-m-events` (no START event for `pipeline_health.export`). Neither
+was a Loop M design fault. Loop M2 kept every Loop M decision, restored its work verbatim and fixed both causes.
+
+**Working tree:** Loop M's 21 changed paths were backed up (a tarball, a `git diff --binary` and their sha256 sums,
+in `.loop-archive/run-16-loopM`), then put away with `git stash` so the baseline ran honestly at a clean 2029cfa
+(524 carried checks passing). The Builder restored them with `git stash pop`; all 21 files matched the tarball and the
+sha256 list byte for byte.
+
+**Diagnosis 1, the nav overlay race (not caused by Loop M):**
+- `web/css/layout.css` opened the overlay with `@keyframes nav-menu-in`: `translateY(-8px)` → none, 320 ms. The top
+  row is 56 px and its wordmark link and "Close menu" button are 44 px high, so their top sits 5.5 px down at rest.
+  The frozen spec scans right after `toBeVisible()`, and its top-edge points land 1 px inside each element. While the
+  slide is more than ~7 px up, those points are above the viewport: `elementFromPoint` gives null.
+- Reproduced at 2029cfa: with the animation paused at t = 0, 10, 20 and 25 ms the misses were byte-identical to the
+  Checker's; from 30 ms on there were none. The animation also sits at t = 0 before its first frame, so the spec
+  fails whenever its scan lands in the first ~25 ms, which a loaded machine makes likelier (12 Linux runs passed, 1
+  failed). Loop M changed nothing the failing step loads.
+- **Fix:** the keyframes fade only (opacity 0 → 1, still 320 ms, `--ease-standard`), so the overlay's geometry is the
+  same at every instant. DESIGN.md §5 allows opacity-only motion; reduced motion is unchanged. The 8 px slide is gone
+  (DESIGN_BACKLOG #64 asks the user whether to keep the fade or slide only the links below a fixed top row).
+
+**Diagnosis 2, the lost event (a segfault in the provider's forked emitter):**
+- `apache-airflow-providers-openlineage` 2.11.0 on Airflow 2 sends every task event from `os.fork()`: the child emits,
+  then `os._exit(0)`. Only its 10 s timeout is configurable, and the parent logs nothing when the child dies.
+- Evidence: the Docker VM's kernel log had a **segfault** in `libc.so.6` for a process titled
+  `/home/airflow/.… - OpenLineage - …` (the title the provider's child sets), and WSL captured a 1.8 GB core in
+  `%LOCALAPPDATA%\Temp\wsl-crashes` (`wsl-crash-1792180714-62-_usr_local_bin_python3.12-11.dmp`; epoch 1792180714 =
+  19:58:34 UTC, the export START fork). `pystack` on the core: pid 62, ppid 16 (the `dags test` process), inside
+  `listener.on_running → get_template_context() → SQLAlchemy`, where an allocation started a GC pass. gdb's native
+  stack: `pthread_join` ← `Curl_thread_join` ← `curl_easy_cleanup` ← `Aws::S3::S3Client::~S3Client` ←
+  `arrow::fs::S3FileSystem` dispose ← `pyarrow._fs.FileSystem` dealloc ← GC.
+- Root cause: `pipeline_health.minutely` writes `metrics.pipeline_minutely` with pyiceberg, which leaves a pyarrow
+  `S3FileSystem` as cyclic garbage; its curl handles own async-resolver threads. In the forked child those threads do
+  not exist, so when the child's GC pass freed the inherited filesystem, its destructor joined a thread descriptor in
+  unmapped memory: SIGSEGV, no event, no log. The ~6 s core capture is the gap before `export` ran (Loop M's
+  "pipeline_health +6.6 s").
+- How often: **1 of 103** task runs in Loop M's run had an incomplete event pair, but any fork after a pyarrow S3 use
+  could hit it (the 16 mapped maintenance tasks, the backfill's loads, the provider's DAG-event pool).
+- **Fix:** `dockwatch.batch.lineage` registers `os.register_at_fork(before=gc.freeze, after_in_parent=gc.unfreeze)`
+  at import. Every annotated DAG file imports it, and `airflow dags test` parses the whole folder. A forked child
+  never collects objects it inherited (its own new objects are collected normally); the parent unfreezes right after
+  the fork and collects its garbage as before. `gc.freeze` / `gc.unfreeze` are O(1); neither Airflow nor OpenLineage
+  uses them or `register_at_fork`. The host (Windows) has no `register_at_fork` and skips it.
+- **Rejected:** a longer `execution_timeout` (the child dies, it does not hang); retrying, patching or upgrading the
+  provider (an edit of a dependency or an image rebuild); closing the filesystem in `dag_tasks.py` (forbidden code,
+  and it covers one source of the hazard only); tolerating lost events in `accept-m-events` (a loosened check).
+
+**Checks (205 = Loop M's 199 unchanged + 6):** `accept-m2-guard` (the exact check set, pins, `layout.css` changed
+only inside `nav-menu-in`, the other CSS files unchanged, the new Airflow test present), `accept-m2-nav-motion`
+(paused at t = 0 / 10 / 20 / 25 / 50 / 320 ms of `nav-menu-in`, the frozen spec's own scan finds 7 pressables and 0
+misses), `accept-m2-fork-safe` (in the Airflow image with the real DAG folder: a forked child's GC pass never
+finalizes an inherited object, the parent still does, the child exits 0), **`accept-m2-events-all`** (every task run
+since the run's first dag-test has a START and a COMPLETE / FAIL / ABORT, at least 80 of them, and each recorded
+dag-test run is complete), `metric-m2-events` (task runs per DAG, incomplete counts, python3.12 WSL crash dumps) and
+`accept-m2-docs`. `check_m.py`'s guard was re-based to accept a superset of its 18 new checks; `check_m2.py` pins the
+exact set, and `pins.json` was re-pinned for both.
+
+**Tests:** `tests/airflow/test_loopm_lineage.py` gained
+`test_forked_openlineage_emitters_never_collect_inherited_garbage`: a fresh interpreter imports only
+`dockwatch.batch.lineage`, leaves a cyclic object with a finalizer, forks, and runs a GC pass in the child; the child
+exits 0 and never finalizes it, the parent does after its own pass, and the provider's `_fork_execute` still calls
+`os.fork()` (so a provider that stops forking shows up). Without the hook the same probe finalizes in both processes.
+Airflow image 22 pass; host 139 pass, 7 skipped; Playwright 78.
+
+**Measured (Builder run of all 205 checks in foreground chunks, 2026-10-16 15:15–16:02 local, OpenLineage on):**
+- Events: from the cutoff (the `iceberg_maintenance` dag-test, 22:41:34 UTC) 91 task runs (`trip_history_monthly`
+  56 with the 12-month backfill, `iceberg_maintenance` 18, `partition_evolution_demo` 7, `marts_daily` 5,
+  `pipeline_health` 3, `cdc_slot_keepalive` 2): **incomplete 0**, every recorded dag-test run complete, 452 event
+  files (3.2 MB) all valid. **Crash dumps 0** since the cutoff (the only python3.12 dump is Loop M's).
+- `airflow-cli` peaks: `marts_daily` 617 MiB (Loop M's Checker 642), `trip_history_monthly month=2026-09` 545 (609),
+  `pipeline_health` 379 (463), the backfill 725 (744), legacy 2019-01 451 (5 s sampler), `iceberg_maintenance` 301,
+  `partition_evolution_demo` 298. Far under the 900 MiB stop line; no OOM kill.
+- dag-test seconds: `pipeline_health` 27.8 s (Loop M 32.3 s, which included the ~6 s core capture), `marts_daily`
+  47.3 s, `trip_history_monthly` 32.9 s, `iceberg_maintenance` 42.4 s, `partition_evolution_demo` 31.1 s; the
+  backfill check 257 s.
+- Trino: 2,021 MiB on the first JVM (during the maintenance checks), above the 1,950 MiB flag line as in Loop M (2,037) and
+  its baseline (2,022): flagged, no limit change. `marts_daily` 1,733 MiB in the DAG, 1,846 MiB with the checks'
+  queries; `pipeline_health` 1,067 MiB.
+- Marquez after the replay: `marquez-api` 275 MiB, `marquez-db` 71 MiB, `marquez-web` 34 MiB; 84 events, 30 jobs.
+- Both Linux web checks passed (`accept-ci-linux-web` 144 s, `-repeat` 177 s, each after waiting for ≥ 2,000 MiB host
+  free).
+
+## 2026-10-16 · Loop M3 · Loop M2's work restored and verified; the alerts-stable stop is a Windows port-allocation fault
+
+**Why a Loop M3:** Loop M2's Checker run (iteration 1, uncommitted) ended in **STOP_REGRESSION** at 204 / 205. Every
+one of the 109 acceptance checks passed, `accept-m2-events-all` included (91 task runs, 0 incomplete: 0 lost events),
+and `metric-m2-events` found 0 new crash dumps since the cutoff. The one failure was `accept-alerts-stable`, an
+existing check that passed at baseline: 38 of 39 repeats passed, and repeat 1 of `alerts.spec.js:113` failed with
+`page.goto: net::ERR_NO_BUFFER_SPACE at http://127.0.0.1:5179/index.html`. The same check stopped Loop I's iteration 1
+with the same error (the M4b "done" entry above). Loop M3 changes no product code: it restores M2's tree, adds two
+runner preconditions and these docs.
+
+**Working tree:** M2's 22 changed paths were backed up (a tarball, a `git diff --binary` and their sha256 sums, in
+`.loop-archive/run-17-loopM2`) and put away with `git stash` (`loopM2-iter1`), so the baseline ran at a clean 2029cfa
+(524 passing, the 19 Loop M / M2 acceptance checks failing as expected). The Builder restored them with
+`git stash pop` (clean; the stash dropped itself): all 22 files byte-identical to `loopM2-worktree.tgz`,
+`sha256sum -c` clean, and `git status` lists exactly the 22 paths. No tar fallback was needed.
+
+**Diagnosis: Windows could not allocate an ephemeral port for Chromium's `connect()`:**
+- M2's trace: the document request started at 23:26:47.653Z and failed 2.6 ms later, before any byte was sent. The
+  System log has Tcpip event **4231** at 23:26:47.6549Z, the same millisecond: "A request to allocate an ephemeral port
+  number from the global TCP port space has failed due to all such ports being in use."
+- Loop I's trace (18:25:39.942Z): `css/base.css` failed in 4.4 ms with the same error, while the other 6 requests the
+  page opened in that millisecond succeeded. One allocation failed; the pool was not exhausted for any length of time.
+- **The host does this without DockWatch:** the System log holds 63 × 4231 (TCP), 114 × 4266 (the UDP equivalent) and
+  11 × 4227 (TIME_WAIT endpoint reuse) back to 2025-10-28, a year before DockWatch, many of them at 1-5 AM. The events
+  are throttled (shortest gap ~13 h; none was logged for Loop I's failure).
+- Host facts: dynamic range 49152-65535 (16,384 ports, 660 excluded by Hyper-V / WinNAT); TIME_WAIT lasts **120 s**
+  (measured: gone between 110 and 120 s; no registry override); Logitech G HUB's `lghub_agent.exe` connects to closed
+  localhost ports ~0.7 times a second (133,797 TCPv4 connection failures since boot); Lenovo `FBNetFilter` and Riot
+  Vanguard `vgk` loaded; non-paged pool 892 MiB, commit 87 %.
+- **DockWatch's own footprint is small:** a replay of the alerts block (`accept-alerts-e2e` … `accept-alerts-stable`)
+  with a 4 Hz `netstat` sampler took client TIME_WAIT on 127.0.0.1:5179 from 0 to 79 after `accept-alerts-e2e`, 188
+  when `accept-alerts-stable` started and 417 at its end; the peak of local ephemeral ports in use was 497 of 16,384
+  (3 %), ~6 sockets per test. A second replay through the full suite, beside a 50 Hz `bind(0)` probe: 11,368
+  allocations, 0 failures. Both replays passed.
+- Synthetic load: 7,002 client TIME_WAITs on one loopback endpoint plus 4,800 concurrent connects gave 0 errors; a
+  17,000-bind sweep through the whole range gave 0 failures.
+- Chromium stress (a new context per page load, 4 in parallel, 60 s, a scratch copy of the server on :5189): with the
+  unchanged `tests/web/serve.py`, run 1 made 1,183 loads / 35,526 requests and hit **1** `net::ERR_NO_BUFFER_SPACE` at
+  ~8,250 client TIME_WAITs; run 2 made 1,117 loads with 0 failures at 6,232. With one change (a reset instead of a FIN
+  when the browser closes first, `SO_LINGER 0`): 1,256 loads / 37,764 requests, 0 failures, 0 client TIME_WAITs, at
+  most 76 ports in use. The error reproduces only at 12-17× DockWatch's peak, and rarely even there.
+- **Conclusion:** a rare, transient fault in Windows' port allocator, which this host shows on its own. The only
+  contributor DockWatch controls is the TIME_WAIT pile-up on :5179 from back-to-back Playwright checks. It has hit 2 of
+  the 34 archived `accept-alerts-stable` runs and no other check: **~6 %** of full Checker runs.
+
+**Rejected:**
+- Playwright retries or a `playwright.config.js` change (pinned by `accept-no-loosening` / `accept-b-guard`), and an
+  edit of `tests/web/serve.py`, a frozen test file (`accept-m-guard`: every test file of 2029cfa unchanged).
+- Windows settings (the port range, G HUB, the Lenovo network filter, Vanguard): the user's machine, the user's call.
+- A runner-supplied replacement server on :5179 via `reuseExistingServer`: it would swap the server the frozen tests run
+  against.
+- A TIME_WAIT threshold sold as a fix: the failures happened at 300-460 TIME_WAITs, where 7,000 do not fail.
+
+**Two runner preconditions** (runner steps like the memory waits, not checks; `.loop/checks/m3/envnet.py`):
+- `python .loop/checks/m3/envnet.py wait 180` right before `accept-alerts-stable` and right before
+  `accept-web-full-suite`, logged to `tcpwait.log`: it waits until no TCP socket on port 5179 is in TIME_WAIT, up to
+  180 s, and always exits 0; it never skips, retries or judges a check. Draining the pile-up halves the TIME_WAITs live
+  during the two densest checks. That lowers the odds; it does not remove them.
+- `envnet.py events <run start>` at the end of a run and right after any failed host Playwright check lists the Tcpip
+  4227 / 4231 / 4266 events since the run started (`tcpip-events.log`).
+- Measured: the baseline's `tcpwait` drained 115 → 0 in 100.4 s before `accept-alerts-stable` and 235 → 0 in 105.4 s
+  before the full suite; the Builder's run 109 → 0 in 100.4 s and 235 → 0 in 105.4 s (all `reached: true`). Then
+  `accept-alerts-stable` 39 passed (46.2 s) and the full suite 78 passed (93.7 s). No Tcpip 4227 / 4231 / 4266 event
+  in either run.
+
+**U1, decided by the user (2026-10-16):** if a host Playwright check fails **only** with `net::ERR_NO_BUFFER_SPACE`, the
+loop runner re-runs that one check once, immediately. The check's status is the re-run's, which must pass completely;
+both logs are kept (`<id>.attempt1.log` and `<id>.log`) and the report names it. Any other error text, or a failing
+re-run, is a real failure. The rule applies to this fault only, to no other flake. No test, config or check changed
+for it. The fixes themselves (the `serve.py` reset-on-close edit, a wider port range, quitting G HUB or the Lenovo
+filter during runs) stay with the user.
+
+**Checks:** M2's 205, unchanged and in order. No new check and no guard re-base: the committed baseline is still
+2029cfa, and `.loop/checks/m3/` lies outside every guard's pin glob.

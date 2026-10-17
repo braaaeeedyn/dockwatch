@@ -1,7 +1,8 @@
 """Pure memory rules for the batch side (M4a). Stdlib only: tasks.py imports this module by path.
 
-Trino (1.5 GiB) never runs beside a Spark JVM (2 GiB) or Kafka Connect (1 GiB) on this host. `refusal()` says why a
-task must not start, given a `running(service)` probe (docker ps by compose labels in real use, a dict in tests).
+Trino (1.5 GiB) never runs beside a Spark JVM (2 GiB) or Kafka Connect (1 GiB) on this host, and Marquez (Loop M,
+profile obs) never beside any of them, both ways round. `refusal()` says why a task must not start, given a
+`running(service)` probe (docker ps by compose labels in real use, a dict in tests).
 """
 
 import subprocess
@@ -36,18 +37,30 @@ SPARK_CONNECT_TASKS = (
 # cdc_slot_keepalive starts the existing `connect` container: never beside Spark or Trino.
 KEEPALIVE_TASKS = ("cdc_slot_keepalive",)
 KEEPALIVE_BLOCKERS = ("status-stream", "cdc-apply", "trino")
+# Marquez (lineage-up): refused while Trino, a Spark JVM or Connect runs; while it runs, all of the above refuse.
+LINEAGE_TASKS = ("lineage-up",)
+LINEAGE_BLOCKERS = ("trino", "status-stream", "cdc-apply", "connect")
 
 STOP_HINT = {
     "status-stream": "python tasks.py stream-stop",
     "cdc-apply": "wait for the CDC apply to finish",
     "connect": "python tasks.py connect-stop",
     "trino": "python tasks.py batch-stop",
+    "marquez-api": "python tasks.py lineage-stop",
 }
 
 
 def refusal(task: str, running: Callable[[str], bool]) -> str | None:
     """None if `task` may start now, else the reason it may not (the reason names the running service)."""
-    if task in TRINO_TASKS:
+    if task in (*TRINO_TASKS, *SPARK_CONNECT_TASKS, *KEEPALIVE_TASKS) and running("marquez-api"):
+        return (
+            f"{task}: Marquez running; stop it first ({STOP_HINT['marquez-api']}). Marquez never runs beside Trino, "
+            "a Spark JVM or Kafka Connect on this host."
+        )
+    if task in LINEAGE_TASKS:
+        blockers = LINEAGE_BLOCKERS
+        why = "Marquez never runs beside Trino, a Spark JVM or Kafka Connect on this host"
+    elif task in TRINO_TASKS:
         blockers = TRINO_BLOCKERS
         why = "Trino and the Airflow scheduler never run beside a Spark JVM or Kafka Connect on this host"
     elif task in SPARK_CONNECT_TASKS:

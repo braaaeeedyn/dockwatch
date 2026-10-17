@@ -7,6 +7,8 @@ overwrite of the month, Trino count-back, lake.metrics.trip_loads).
 The month is the `month` param (YYYY-MM) if set, else the run's data interval. catchup=True makes
 `airflow dags backfill -s ... -e ...` load history; the DAG stays paused (unpaused, the scheduler would load every month
 since 2019-01, ~0.9 GB of downloads).
+
+Inlets / outlets (OpenLineage datasets, Loop M): dockwatch.batch.lineage.annotate.
 """
 
 from datetime import timedelta
@@ -17,7 +19,7 @@ from airflow.models.param import Param
 from airflow.operators.python import PythonOperator
 from airflow.sensors.python import PythonSensor
 
-from dockwatch.batch import airflow_defaults, dag_tasks
+from dockwatch.batch import airflow_defaults, dag_tasks, lineage
 
 with DAG(
     dag_id="trip_history_monthly",
@@ -41,3 +43,5 @@ with DAG(
     download = PythonOperator(task_id="download", python_callable=dag_tasks.trips_download)
     load = PythonOperator(task_id="load", python_callable=dag_tasks.trips_load, sla=timedelta(hours=1))
     guard >> published >> download >> load
+
+lineage.annotate(dag)

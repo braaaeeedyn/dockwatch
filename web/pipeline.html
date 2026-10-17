@@ -231,6 +231,31 @@
             <div class="skeleton chart-skeleton" aria-hidden="true"></div>
             <p class="caption" data-caption>Loading…</p>
           </section>
+
+          <section class="card chart-card" data-chart="lineage" aria-labelledby="lineage-title">
+            <h2 id="lineage-title" class="chart-card__title">Lineage</h2>
+            <p class="chart-card__takeaway">Trip history and silver feed dbt’s three marts; the quality gate checks the marts and silver before the insights export.</p>
+            <figure class="lineage">
+              <img class="lineage__image" src="img/lineage-batch.png" width="1600" height="1000" loading="lazy" decoding="async" alt="Marquez lineage graph of the batch jobs: trip_history_monthly.load writes lake.bronze.trips, which marts_daily.dbt_build reads with the silver tables to build the three marts; marts_daily.quality_gate reads the marts and lake.silver.station_status, and marts_daily.export publishes the insights. The table below lists the same graph.">
+              <figcaption class="caption">Source: OpenLineage events from Airflow, replayed into Marquez 0.51.1 from the newest run of each DAG; captured 16 October 2026. The screenshot shortens long names; the table has them in full.</figcaption>
+            </figure>
+            <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lineage-title">
+              <table class="data-table data-table--plain lineage__table">
+                <caption class="visually-hidden">Every batch job with the datasets it reads and writes, as OpenLineage records them</caption>
+                <thead><tr><th scope="col">Job</th><th scope="col">Reads</th><th scope="col">Writes</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row"><code>trip_history_monthly.download</code></th><td>s3://baywheels-data/tripdata</td><td>data/trips/zips</td></tr>
+                  <tr><th scope="row"><code>trip_history_monthly.load</code></th><td>data/trips/zips</td><td>lake.bronze.trips, lake.metrics.trip_loads</td></tr>
+                  <tr><th scope="row"><code>marts_daily.stations</code></th><td>s3://dockwatch/raw/gbfs/station_information</td><td>lake.bronze.station_information</td></tr>
+                  <tr><th scope="row"><code>marts_daily.dbt_build</code></th><td>lake.silver.station_status, lake.silver.availability_5m, lake.silver.station_episodes, lake.bronze.trips, lake.bronze.station_information</td><td>lake.marts.mart_station_availability_daily, lake.marts.mart_rebalancing_need, lake.marts.mart_trips_vs_availability, data/dbt/target/run_results.json</td></tr>
+                  <tr><th scope="row"><code>marts_daily.quality_gate</code></th><td>lake.marts.mart_station_availability_daily, lake.marts.mart_rebalancing_need, lake.marts.mart_trips_vs_availability, lake.silver.station_status, lake.silver.availability_5m, data/dbt/target/run_results.json</td><td>data/dbt/quality_gate.json, data/quality/expectations.json</td></tr>
+                  <tr><th scope="row"><code>marts_daily.export</code></th><td>lake.marts.mart_station_availability_daily, lake.marts.mart_rebalancing_need, lake.marts.mart_trips_vs_availability, data/dbt/quality_gate.json</td><td>web/data/insights</td></tr>
+                  <tr><th scope="row"><code>pipeline_health.minutely</code></th><td>lake.silver.station_status</td><td>lake.metrics.pipeline_minutely</td></tr>
+                  <tr><th scope="row"><code>pipeline_health.export</code></th><td>lake.metrics.pipeline_minutely, lake.silver.station_status, lake.metrics.maintenance_runs, data/dbt/quality_gate.json, data/quality/expectations.json, data/dbt/target/run_results.json</td><td>web/data/health.json</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </div>
     </main>

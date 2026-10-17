@@ -3,6 +3,8 @@
 guard -> stations (lake.bronze.station_information from the newest GBFS station_information snapshot, pyiceberg)
       -> dbt_build (models + tests; a failed test fails without retry) -> quality_gate (data/dbt/quality_gate.json)
       -> export (web/data/insights/*.json, manifest.json last; only after the gate passed)
+
+Inlets / outlets (OpenLineage datasets, Loop M): dockwatch.batch.lineage.annotate.
 """
 
 from datetime import timedelta
@@ -11,7 +13,7 @@ import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
-from dockwatch.batch import airflow_defaults, dag_tasks
+from dockwatch.batch import airflow_defaults, dag_tasks, lineage
 
 with DAG(
     dag_id="marts_daily",
@@ -31,3 +33,5 @@ with DAG(
         task_id="export", python_callable=dag_tasks.marts_export, trigger_rule="all_success", sla=timedelta(hours=1)
     )
     guard >> stations >> dbt_build >> gate >> export
+
+lineage.annotate(dag)

@@ -2,7 +2,7 @@
 #   stream: Redpanda (+ Console), SeaweedFS (S3 API), Iceberg REST catalog, Postgres (ops DB with logical
 #           replication, plus the iceberg_catalog database)
 #   batch:  Trino, Airflow (+ its own airflow-db), on demand only (M4a; python tasks.py batch-up)
-#   obs:    Marquez                   (added in M5)
+#   obs:    Marquez (+ its db and web), on demand only (Loop M; python tasks.py lineage-up)
 # Start with: python tasks.py up stream
 
 name: dockwatch
@@ -26,7 +26,11 @@ x-airflow: &airflow
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     AIRFLOW__WEBSERVER__SECRET_KEY: dockwatch-local-only
-    AIRFLOW__OPENLINEAGE__DISABLED: "true"
+    # Loop M: OpenLineage on, one JSON file per event in data/lineage (the transport never creates the folder:
+    # batch-up / airflow_db_up do); python tasks.py lineage-replay sends the newest run of each DAG to Marquez
+    AIRFLOW__OPENLINEAGE__DISABLED: "false"
+    AIRFLOW__OPENLINEAGE__NAMESPACE: dockwatch
+    AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "file", "log_file_path": "/opt/dockwatch/data/lineage/ol", "append": false}'
     AIRFLOW__LOGGING__LOGGING_CONFIG_CLASS: dockwatch.batch.airflow_logging.LOGGING_CONFIG
     PYTHONPATH: /opt/dockwatch/src
     DOCKWATCH_DATA_DIR: /opt/dockwatch/data
@@ -284,6 +288,45 @@ services:
     # One-shot Airflow CLI: python tasks.py airflow <args> / dag-test (docker compose run --rm --no-deps).
     <<: *airflow
     profiles: [airflow-cli]
+
+  # Marquez (Loop M), on demand only: python tasks.py lineage-up / lineage-replay / lineage-stop. No volume: it always
+  # starts empty and the replay of data/lineage fills it. Never beside Trino, Spark or Connect (batch/guard.py).
+  marquez-db:
+    profiles: [obs]
+    image: postgres:16-alpine
+    environment:  # Marquez's marquez.dev.yml hard-codes these; local only
+      POSTGRES_DB: marquez
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+    mem_limit: 256m
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marquez -d marquez"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  marquez-api:
+    profiles: [obs]
+    image: marquezproject/marquez:0.51.1
+    environment:
+      MARQUEZ_CONFIG: marquez.dev.yml
+      POSTGRES_HOST: marquez-db
+      SEARCH_ENABLED: "false"  # 0.51's default needs an OpenSearch JVM
+    ports: ["15000:5000"]
+    mem_limit: 768m  # JVM default heap (25 %); 181-251 MiB measured
+    restart: "no"
+
+  marquez-web:
+    profiles: [obs]
+    image: marquezproject/marquez-web:0.51.1
+    environment:
+      MARQUEZ_HOST: marquez-api
+      MARQUEZ_PORT: "5000"
+      WEB_PORT: "3000"
+    ports: ["13000:3000"]
+    mem_limit: 256m
+    restart: "no"
 
 volumes:
   checkpoints:

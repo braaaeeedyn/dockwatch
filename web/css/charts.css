@@ -400,3 +400,24 @@ main [hidden] {
 .bars__note {
   color: var(--mute);
 }
+
+/* ---- Lineage (Pipeline): a static Marquez screenshot and the same graph as a table ---- */
+.lineage {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+  min-width: 0;
+}
+
+.lineage__image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+}
+
+.lineage__table td {
+  min-width: 14rem;
+  white-space: normal; /* the dataset lists wrap instead of one very long line */
+}

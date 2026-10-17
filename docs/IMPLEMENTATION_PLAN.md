@@ -275,6 +275,10 @@ path-casing guard. **M4b** (next): `trip_history_monthly`, the dbt project on th
       `quality_gate.json`, `health.json` and on the Pipeline page.)*
 - [ ] OpenLineage: Airflow provider + Spark listener → Marquez (`obs` profile). Screenshot of the graph from
       `gbfs.station_status` to each mart, saved to `docs/img/lineage.png`.
+      *(Loop M: the Airflow half. The provider writes events with the file transport to `data/lineage`; the 8 batch
+      tasks carry OpenLineage inlets / outlets (`batch/lineage.py`); Marquez 0.51.1 runs on demand in the `obs`
+      profile and `lineage-replay` loads the newest run of each DAG; the batch graph is on the Pipeline page
+      (`web/img/lineage-batch.png`). Still unticked: the Spark listener and `docs/img/lineage.png` are Loop N.)*
 - [x] `metrics/`: `metrics.pipeline_minutely` (events/min, end-to-end latency p50/p95 = Iceberg commit time −
       `last_reported`, consumer lag, files per partition) and an export to `web/data/health.json`. *(Loop K: DAG
       `pipeline_health`, hourly; latency is `processed_ts − fetched_ts`; files and partitions per table are in
@@ -292,6 +296,8 @@ shows the full graph.
 | `iceberg_maintenance` covers the M4b and metrics tables (16), `bronze.trips` one month partition per run. | Rewriting all 13 months at once took Trino to 2,024 MiB; one partition keeps one `replace` commit per run. |
 | Great Expectations and OpenLineage → Marquez move to the next loop. | A new runtime inside the carried `marts_daily` gate, and five integration surfaces, did not fit Loop K's budget; Marquez will run on demand only, never beside Trino / Spark / Connect. |
 | Great Expectations (Loop L) runs in its own pinned venv in the Airflow image, as a subprocess of `marts_daily`'s `quality_gate` task, on a query asset over the newest 24 h of silver with no temp tables; blocking expectations fail the gate, freshness only warns; `marts_daily` gets a freshly restarted Trino. | GE 1.24 needs SQLAlchemy 2 and pandas 3 while Airflow 2.11.2 keeps SQLAlchemy 1.4; a new task or DAG would change the carried DAG shape; Spark never runs beside Trino, so freshness can never be under 5 min during the run; Trino had sat at up to 2,024 of 2,048 MiB after the trips stage. |
+| OpenLineage (Loop M) comes from the Airflow provider already in the image, with the file transport into `data/lineage` (one file per event); `python tasks.py lineage-replay` loads the newest run of each DAG into Marquez, which runs on demand in the `obs` profile with no volume and is refused beside Trino / Spark / Connect both ways round. | Marquez never has to run during the batch work (memory: Trino, Spark and Connect already fill the host), and it rebuilds from the files in seconds; the static site shows a screenshot, not a live Marquez. |
+| dbt's lineage is declared on `marts_daily.dbt_build` (every dbt source as an inlet, the three marts and `run_results.json` as outlets, compared with `dbt/dockwatch` by an Airflow-image test) instead of openlineage-dbt. | openlineage-dbt (1.44.1 and 1.54.0) takes a model's inputs from dbt's `parent_map` without resolving ephemeral models, so the four ephemeral `stg_*` models would become phantom `lake.marts.stg_*` datasets and break the silver → marts graph; materialising staging would add Trino work to `marts_daily`. |
 
 ### M6 · AWS target, CI/CD, measurements (week 8)
 - [ ] `terraform apply` (after the manual AWS steps in M0). Point `DOCKWATCH_TARGET=aws` at S3 + Glue; run the stream
@@ -363,6 +369,8 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
       except the GE results (the dbt tests and quality gate are shown instead) and the lineage screenshot; not ticked
       until those exist.)* *(Loop L: the GE results card "Great Expectations on silver" is built on
       `health.json` `quality.expectations`; still unticked until the lineage screenshot exists.)*
+      *(Loop M: a static Lineage card shows the Marquez screenshot of the batch graph (`web/img/lineage-batch.png`)
+      with the same graph as a table; still unticked until Loop N's full graph from `gbfs.station_status` exists.)*
 - **Done when:** every chart reads from a JSON export produced by the pipeline, none hand-made.
 
 ### F5 · Polish and launch (week 8)

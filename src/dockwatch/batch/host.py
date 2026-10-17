@@ -1,4 +1,5 @@
-"""Host side of the batch tasks (M4a): Trino + Airflow lifecycle, one-shot Airflow CLI, `dag-test`, `test-airflow`.
+"""Host side of the batch tasks (M4a): Trino + Airflow lifecycle, one-shot Airflow CLI, `dag-test`, `test-airflow`;
+Marquez on demand (Loop M: lineage-up / -replay / -shot / -stop).
 
 Every compose call runs from the inherited working directory (never a resolved path: on this host
 Path.resolve() returns the on-disk `DockWatch` casing, and Compose would recreate the stream containers; tasks.py
@@ -9,14 +10,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dockwatch.batch import guard
+from dockwatch.batch import guard, lineage
 
 AIRFLOW_IMAGE = "dockwatch-airflow:2.11.2"
 BATCH_SERVICES = ("trino", "airflow-db", "airflow-scheduler", "airflow-webserver")
@@ -27,6 +30,14 @@ BUILD_INPUTS = (
     Path("infra/airflow/dbt-requirements.txt"),
     Path("infra/airflow/gx-requirements.txt"),
 )
+OBS_SERVICES = ("marquez-db", "marquez-api", "marquez-web")
+MARQUEZ_API = "http://localhost:15000"
+MARQUEZ_WEB = "http://localhost:13000"
+# The batch graph from trip_history_monthly.load through dbt_build to the marts, the quality gate and the export.
+LINEAGE_SHOT_URL = f"{MARQUEZ_WEB}/lineage/job/{lineage.NAMESPACE}/marts_daily.dbt_build?depth=2"
+LINEAGE_SHOT = "web/img/lineage-batch.png"
+# The node between download and load, at the far end of the graph from the export: drawn once the graph is.
+LINEAGE_SHOT_SELECTOR = 'text="data/trips/zips"'
 
 
 class BatchError(RuntimeError):
@@ -93,6 +104,7 @@ def ensure_image() -> None:
 
 def airflow_db_up() -> None:
     """airflow-db up (no deps) and its schema migrated (idempotent)."""
+    (DATA / "lineage").mkdir(parents=True, exist_ok=True)  # the OpenLineage file transport never creates it
     ensure_image()
     compose("--profile", "batch", "up", "-d", "--wait", "--no-deps", "airflow-db", timeout=300)
     sh(*airflow_run("db", "migrate"), timeout=600)
@@ -103,6 +115,7 @@ def airflow_db_up() -> None:
 
 def batch_up() -> None:
     refuse("batch-up")
+    (DATA / "lineage").mkdir(parents=True, exist_ok=True)  # the OpenLineage file transport never creates it
     ensure_image()
     compose("--profile", "batch", "up", "-d", "--wait", "--no-deps", "trino", "airflow-db", timeout=300)
     sh(*airflow_run("db", "migrate"), timeout=600)
@@ -121,6 +134,52 @@ def scheduler_up() -> None:
 
 def scheduler_stop() -> None:
     compose("--profile", "batch", "stop", "airflow-scheduler", timeout=300)
+
+
+def lineage_up() -> None:
+    """Marquez (profile obs), always empty: db first (healthy), then api and web; waits for the API."""
+    refuse("lineage-up")
+    lineage_stop()
+    compose("--profile", "obs", "up", "-d", "--wait", "--no-deps", "marquez-db", timeout=300)
+    compose("--profile", "obs", "up", "-d", "--no-deps", "marquez-api", "marquez-web", timeout=300)
+    deadline = time.monotonic() + 180
+    while True:
+        try:
+            with urllib.request.urlopen(f"{MARQUEZ_API}/api/v1/namespaces", timeout=5):
+                break
+        except OSError as e:
+            if time.monotonic() > deadline:
+                raise BatchError(f"Marquez API {MARQUEZ_API} not answering after 180 s ({e}); see "
+                                 "docker compose --profile obs logs marquez-api") from e  # fmt: skip
+            time.sleep(3)
+    print(f"lineage up: Marquez web {MARQUEZ_WEB} (API {MARQUEZ_API}), empty; fill it with python tasks.py "
+          "lineage-replay, stop it with python tasks.py lineage-stop", flush=True)  # fmt: skip
+
+
+def lineage_replay() -> None:
+    try:
+        counts = lineage.replay(DATA / "lineage", MARQUEZ_API)
+    except lineage.ReplayError as e:
+        raise BatchError(str(e)) from e
+    for dag, n in counts.items():
+        print(f"lineage replay: {dag}: {n} events (its newest run)", flush=True)
+    print(f"lineage replay: {sum(counts.values())} events into {MARQUEZ_WEB}", flush=True)
+
+
+def lineage_shot(out: str = LINEAGE_SHOT) -> None:
+    """One Playwright CLI screenshot of the batch graph in Marquez web (1600 x 1000) into `out`."""
+    node = shutil.which("node")  # not npx: on Windows that is npx.cmd, and cmd.exe would mangle the quoted selector
+    if not node:
+        raise BatchError("node not found: install Node and run npm ci")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    sh(node, "node_modules/@playwright/test/cli.js", "screenshot", "--viewport-size", "1600,1000",
+       "--wait-for-selector", LINEAGE_SHOT_SELECTOR, "--wait-for-timeout", "3000", LINEAGE_SHOT_URL, out,
+       timeout=180)  # fmt: skip
+
+
+def lineage_stop() -> None:
+    """Remove the obs containers and only their anonymous volumes (idempotent)."""
+    compose("--profile", "obs", "rm", "--stop", "--force", "--volumes", *OBS_SERVICES, timeout=300)
 
 
 def airflow(*args: str) -> None:

@@ -3,6 +3,8 @@
 guard -> minutely (lake.metrics.pipeline_minutely: the 1,440 minutes before the run from lake.silver.station_status,
                    one pyiceberg commit)
       -> export (web/data/health.json: status, tiles, the minute series, table freshness, quality gate, compaction)
+
+Inlets / outlets (OpenLineage datasets, Loop M): dockwatch.batch.lineage.annotate.
 """
 
 from datetime import timedelta
@@ -11,7 +13,7 @@ import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
-from dockwatch.batch import airflow_defaults, dag_tasks
+from dockwatch.batch import airflow_defaults, dag_tasks, lineage
 
 with DAG(
     dag_id="pipeline_health",
@@ -27,3 +29,5 @@ with DAG(
     minutely = PythonOperator(task_id="minutely", python_callable=dag_tasks.health_minutely)
     export = PythonOperator(task_id="export", python_callable=dag_tasks.health_export, sla=timedelta(minutes=30))
     guard >> minutely >> export
+
+lineage.annotate(dag)

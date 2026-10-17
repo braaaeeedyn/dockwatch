@@ -8,9 +8,10 @@
 **Last updated:** 2026-10-16 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ (partition
 evolution done in M4a, on a lab copy) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
 44 px touch targets everywhere) · F3 alerts rail ✅ · **F4 Insights ✅** (Loop K: insights format 2 and the Insights
-page) · F4b Pipeline page (with the Great Expectations results; no lineage yet) · **M5 pipeline metrics ✅**
+page) · F4b Pipeline page (with the Great Expectations results and the batch lineage card) · **M5 pipeline metrics ✅**
 (`pipeline_health` → `metrics.pipeline_minutely` + `health.json`) · **M5 Great Expectations ✅** (Loop L: suite
-`silver_station_status` inside `marts_daily`'s quality gate) · F5 "Replay a day" ✅, launch tests ✅ (no Lighthouse) · M6 CI (`ci.yml`, on Node 24, with an offline `dbt compile`) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · **M4a ✅** (Airflow 2.11.2 + Trino 483 in the `batch` profile:
+`silver_station_status` inside `marts_daily`'s quality gate) · M5 OpenLineage from Airflow → Marquez on demand
+(Loop M, finished in Loop M2: the batch DAGs; the Spark listener is next) · F5 "Replay a day" ✅, launch tests ✅ (no Lighthouse) · M6 CI (`ci.yml`, on Node 24, with an offline `dbt compile`) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · **M4a ✅** (Airflow 2.11.2 + Trino 483 in the `batch` profile:
 `iceberg_maintenance`, `partition_evolution_demo`, `cdc_slot_keepalive`, retries / alerts, path-casing guard) · **M4b ✅**
 (`trip_history_monthly` + a 12-month backfill into `bronze.trips` with pyiceberg, the dbt project on Trino,
 `marts_daily` → `web/data/insights/*.json`) · DESIGN.md v1.0.1
@@ -21,10 +22,39 @@ page) · F4b Pipeline page (with the Great Expectations results; no lineage yet)
 
 | What | Why | Status |
 |---|---|---|
-| **M5 OpenLineage → Marquez (Loop M):** a compose profile with Marquez on demand only (refused beside Trino / Spark / Connect); Airflow and dbt write events to a file that is replayed into Marquez; a lineage section on the Pipeline page. Then the Spark listener (Loop N). | The last M5 item; F4b is ticked only once the lineage screenshot exists. | Not started. |
-| **Needs the user:** the AWS account (M6: S3 + Glue, Athena, Lambda + SNS, `terraform plan` in CI, `deploy.yml`, METRICS.md), pushing Loop K and Loop L and checking their GitHub runs, Lighthouse on the deployed site, the human-eye checks (greyscale, a look at the 48 launch screenshots, the live alert timing, how the expectations card looks), the design calls in DESIGN_BACKLOG (#58 latency scale, #62 heatmap minimum coverage) | Accounts, approvals and judgment only the user can give. | Waiting for the user. |
+| **M5 OpenLineage Spark listener (Loop N):** the `openlineage-spark` jar in the Spark image, the file transport from `status_stream` and `cdc/apply.py` into `data/lineage`, one dataset naming shared with the Airflow events so the graph joins at silver, and the full screenshot `docs/img/lineage.png` from `gbfs.station_status` to each mart. | The last M5 item; M5 OpenLineage and F4b are ticked once Spark's lineage is in Marquez too. | Not started. |
+| **Needs the user:** the AWS account (M6: S3 + Glue, Athena, Lambda + SNS, `terraform plan` in CI, `deploy.yml`, METRICS.md), pushing Loop K, Loop L and Loop M and checking their GitHub runs, Lighthouse on the deployed site, the human-eye checks (greyscale, a look at the 48 launch screenshots, the live alert timing, how the expectations card and the dark Marquez screenshot in the lineage card look), the design calls in DESIGN_BACKLOG (#58 latency scale, #62 heatmap minimum coverage, #63 the lineage card, #64 the nav overlay's fade), deleting the 1.8 GB WSL crash dump of Loop M's crashed OpenLineage child | Accounts, approvals and judgment only the user can give. | Waiting for the user. |
 
-Done most recently: **Loop L: Great Expectations inside `marts_daily`'s quality gate, its results on the Pipeline
+Done most recently: **Loop M: OpenLineage from Airflow, replayed into Marquez on demand, and the batch lineage card
+on the Pipeline page**, finished in **Loop M2** with two root-cause fixes and restored and verified in **Loop M3**
+(see *Lineage*, *Local stack* and *Website* below).
+- **OpenLineage on in Airflow** (provider 2.11.0, openlineage-python 1.44.1, already in the image) with the **file
+  transport**: every Airflow run writes one JSON file per event to `data/lineage/ol-<time>.json`, while Marquez is
+  down. `batch-up` and `dag-test` create `data/lineage` first (the transport never creates it).
+- **Inlets / outlets** (OpenLineage `Dataset`s from `batch/lineage.py`) on the 8 batch tasks of
+  `trip_history_monthly`, `marts_daily` and `pipeline_health`; `marts_daily.quality_gate` reads
+  `lake.silver.station_status` (the Great Expectations batch) besides the three marts. dbt's lineage is carried by
+  `marts_daily.dbt_build` (every dbt source in, the marts out): openlineage-dbt would turn the ephemeral staging
+  models into phantom datasets.
+- **Marquez on demand** (compose profile `obs`: `marquezproject/marquez:0.51.1`, `marquez-web:0.51.1` and a
+  `postgres:16-alpine` db, no volume, so it always starts empty), refused beside Trino, Spark or Connect and the other
+  way round. `lineage-up`, `lineage-replay` (the newest run of each DAG), `lineage-shot`, `lineage-stop`.
+- **The Pipeline page's Lineage card:** the Marquez screenshot `web/img/lineage-batch.png` and the same graph as a
+  table (its text alternative).
+- **Forked OpenLineage emitters are safe** (Loop M2): the provider sends every task event from an `os.fork()` of the
+  Airflow process, and a GC pass in such a child once freed an inherited pyarrow `S3FileSystem` (SIGSEGV, a lost
+  event). `batch/lineage.py` registers `os.register_at_fork(before=gc.freeze, after_in_parent=gc.unfreeze)`.
+- **The nav overlay fades in** (Loop M2): `nav-menu-in` is opacity only (still 320 ms). The old 8 px slide from above
+  put the top row's touch targets partly off-screen for its first ~25 ms, which the touch-target test could catch.
+- **Measured** (Loop M2's Builder run of all 205 checks, OpenLineage on): 91 task runs from the first dag-test on
+  (the 12-month backfill included), every one with a START and a COMPLETE, and no new crash dump; `marts_daily`
+  47.3 s, `airflow-cli` 617 MiB, Trino 1,733 MiB; `pipeline_health` 27.8 s, 379 MiB; `trip_history_monthly` 545 MiB;
+  the backfill 725 MiB. Marquez: api 275 MiB, db 71 MiB, web 34 MiB. The newest runs of the six DAGs: 84 events
+  (`data/lineage`: 452 files, 3.2 MB).
+- `tests/test_lineage.py` (6 host tests), `tests/airflow/test_loopm_lineage.py` (4 in the Airflow image) and
+  `tests/web/pipeline-lineage.spec.js` (4 Playwright tests).
+
+Before that: **Loop L: Great Expectations inside `marts_daily`'s quality gate, its results on the Pipeline
 page, a readable latency chart and a fresh Trino JVM for `marts_daily`** (see *Great Expectations*, *Pipeline
 health* and *Website* below).
 - **Great Expectations 1.24.0** in its own pinned venv `/opt/gx-venv` in the Airflow image (41 packages,
@@ -34,7 +64,8 @@ health* and *Website* below).
   counts, bikes + docks within capacity, uniqueness of station × snapshot, and freshness) on the newest 24 hours of
   `lake.silver.station_status`, run as the checkpoint `marts_daily_quality` inside the `quality_gate` task. Blocking
   failures stop the insights export; freshness only warns. First real run: 382,143 rows, 9 passed, freshness a
-  warning (the newest row was 32 min old: Spark runs on demand), 2.7 s.
+  warning (the newest row was 32 min old: Spark runs on demand), 2.7 s; in Loop L's Checker run 382,254 rows,
+  3.2 s.
 - **Results:** `data/quality/expectations.json`, an `expectations` summary in `data/dbt/quality_gate.json`, the whole
   document in `web/data/health.json` (`quality.expectations`) and a new **Great Expectations on silver** card on the
   Pipeline page.
@@ -42,9 +73,9 @@ health* and *Website* below).
   the title "Latency", and its left margin is measured from the widest label, so labels never overlap the title; the
   p95 tile's sub-line starts with the p95 as a duration ("21 h 4 min · fetch to silver, …").
 - **Fresh Trino for `marts_daily`:** the checks restart Trino (`batch-stop` then `batch-up`) right before
-  `marts_daily`; it peaked at 1,694–1,717 MiB there, with Metaspace at about 180 / 185 MiB used / committed after
-  the marts.
-- `tests/test_expectations.py` (6 host tests), `tests/airflow/test_loopl_gx.py` (3 in the Airflow image) and
+  `marts_daily`; it peaked at 1,694–1,768 MiB in the DAG, up to 1,885 MiB with the checks' queries, with Metaspace at
+  about 180 / 185 MiB used / committed after the marts.
+- `tests/test_expectations.py` (6 host tests), `tests/airflow/test_loopl_gx.py` (3 Airflow-image tests) and
   `tests/web/pipeline-quality.spec.js` (5 Playwright tests).
 
 Before that: **Loop K: insights format 2, the Insights and Pipeline pages, pipeline health, maintenance of
@@ -69,7 +100,7 @@ maintenance* and *Website* below).
   `lake.metrics.pipeline_minutely` (events, processed, p50 / p95 fetch-to-silver latency, consumer lag) and
   `web/data/health.json` (overall status, tiles, the minute series, table freshness, the dbt tests and quality gate,
   the latest compaction). Last run: success in 20 s, health.json 78,862 B, Trino 1,374 MiB.
-- **The Pipeline page** (`pipeline.html`, F4b, no lineage yet): a status banner with icon + word,
+- **The Pipeline page** (`pipeline.html`, F4b): a status banner with icon + word,
   four stat tiles, latency and events-per-minute charts, the freshness table, the dbt tests with the quality gate,
   and files before / after the latest compaction. `tests/web/pipeline.spec.js`: 9 tests on a real export.
 - **Launch tests** (`tests/web/launch.spec.js`, F5 without Lighthouse): 48 full-page screenshots (4 pages × 6
@@ -198,9 +229,8 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next: OpenLineage → Marquez (Loop M), then the Spark lineage listener (Loop N), local measurements in METRICS.md
-(Loop O) and a local Lighthouse run (Loop P); M6 and the deployed-site parts of F5 need the user (see *Working on
-now*).
+Next: the Spark lineage listener (Loop N), local measurements in METRICS.md (Loop O) and a local Lighthouse run
+(Loop P); M6 and the deployed-site parts of F5 need the user (see *Working on now*).
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -213,6 +243,7 @@ now*).
 | Spark CDC apply (`cdc-apply`) | **Not running**; started by `cdc-catchup` / `cdc-verify` / `cdc-reset` with `docker compose run`, exits when done. | — |
 | Trino + `airflow-db` | **Not running** (on demand only: `python tasks.py batch-up`; `restart: "no"`). | `python tasks.py batch-stop` |
 | Airflow scheduler | **Not running** (on demand: `python tasks.py scheduler-up`; DAGs are paused at creation). One-shot Airflow CLI runs (`dag-test`, `airflow …`) exit when done. | `python tasks.py scheduler-stop` |
+| Marquez (`marquez-db`, `marquez-api`, `marquez-web`) | **Not running** (on demand only: `python tasks.py lineage-up`, then `lineage-replay`; `restart: "no"`, no volume). | `python tasks.py lineage-stop` (removes the containers) |
 
 Spark on demand: `python tasks.py catchup` processes everything in Kafka since the last run (`availableNow`) and
 exits (~30 s for a few minutes of backlog; Kafka keeps 7 days). `python tasks.py stream` keeps it running (one
@@ -225,8 +256,9 @@ only ~1–3 GB free; the 24/7 job stalled there (driver heartbeat timeout), whic
 Kafka Connect peaks at ~520 MiB (`mem_limit: 1g`, heap `-Xmx512m`) and the CDC apply at ~1.2 GB (`mem_limit: 2g`);
 Connect and a Spark JVM never run together (the CDC tasks and `catchup` refuse). Trino (`mem_limit: 2g`, heap 1 GB;
 measured peaks 1,438–1,845 MiB in M4a, up to 2,013 MiB in an M4b `marts_daily` run that followed other batch work;
-1,694–1,717 MiB for `marts_daily` with Great Expectations on a fresh JVM) never runs beside a Spark JVM or Connect: `batch-up` refuses beside them, and `catchup`,
-`stream`, `inspect`, `verify-lake`, `sql` and the CDC tasks refuse while Trino runs.
+1,694–1,768 MiB in the DAG, up to 1,885 MiB with the checks' queries, for `marts_daily` with Great Expectations on a fresh JVM) never runs beside a Spark JVM or Connect: `batch-up` refuses beside them, and `catchup`,
+`stream`, `inspect`, `verify-lake`, `sql` and the CDC tasks refuse while Trino runs. Marquez (~380 MiB for its
+three containers) runs only when none of Trino, Spark or Connect does, and while it runs all of their tasks refuse.
 
 ---
 
@@ -281,6 +313,12 @@ Airflow (LocalExecutor, metadata in airflow-db) ──(DAG tasks, HTTP)──►
                                  → web/data/health.json (status, tiles, minutes, table freshness, quality incl. the
                                    Great Expectations results, compaction)
         any task failure / SLA miss → data/airflow/alerts.jsonl (+ SNS when DOCKWATCH_ALERTS_TOPIC_ARN is set)
+        every DAG and task run   → OpenLineage events (file transport) → data/lineage/ol-<time>.json, one file each
+
+Lineage (on demand; Marquez never beside Trino, Spark or Connect):
+data/lineage/ol-*.json ──(python tasks.py lineage-replay: the newest run of each DAG, in event-time order)──►
+        Marquez API :15000 (empty at every lineage-up) ──► Marquez web :13000
+        ──(python tasks.py lineage-shot, Playwright CLI)──► web/img/lineage-batch.png (the Pipeline page's Lineage card)
 ```
 
 ---
@@ -293,8 +331,8 @@ Airflow (LocalExecutor, metadata in airflow-db) ──(DAG tasks, HTTP)──►
 | `DOCKWATCH_PLAN.md` | The original project plan (what and why). Unchanged. |
 | `IMPLEMENTATION_PLAN.md` | Milestones M0–M7 / F1–F5, decisions (incl. M2 decisions), progress checkboxes. |
 | `DESIGN.md` | DockWatch design system **v1.0.1**, frozen until launch (F5); v1.0.1 = accessibility fix (44 px touch targets in the list table). |
-| `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop, 6 from F3: #46–#51, 5 from F4 Insights: #52–#56, 4 from F4b / launch: #57–#60, 2 from Loop L: #61 the expectations card, #62 a proposed heatmap minimum coverage); #35 (touch targets) is resolved. |
-| `CONCEPTS.md` | Kafka, stream processing, Iceberg, change data capture, table maintenance / orchestration, dbt / marts / backfills, lookup tables / size budgets / compaction in steps, and expectations vs tests (suite, checkpoint, batch, blocking vs warning) explained through this codebase. |
+| `DESIGN_BACKLOG.md` | Gaps and judgment calls found while building against the frozen DESIGN.md (14 from F1, 18 from F2, 3 from the F2 review, 9 from the paused state / Replay a day loop, 6 from F3: #46–#51, 5 from F4 Insights: #52–#56, 4 from F4b / launch: #57–#60, 2 from Loop L: #61 the expectations card, #62 a proposed heatmap minimum coverage, 1 from Loop M: #63 the lineage card, 1 from Loop M2: #64 the nav overlay's fade); #35 (touch targets) is resolved. |
+| `CONCEPTS.md` | Kafka, stream processing, Iceberg, change data capture, table maintenance / orchestration, dbt / marts / backfills, lookup tables / size budgets / compaction in steps, expectations vs tests (suite, checkpoint, batch, blocking vs warning), and lineage (job, run, dataset, namespaces, facets, the file transport and the replay, manual inlets / outlets) explained through this codebase. |
 | `reference/DESIGN_SOURCE_transitpulse.md` | The TransitPulse design file that was here before; reference only. |
 | `CURRENT_STATE.md` / `DEVLOG.md` | This file / append-only history. |
 
@@ -326,7 +364,8 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 | `cdc/iceberg_checksums.py` | Spark: rows, columns and checksum of each `lake.ops.*` table over Postgres's column list (passed by the host), plus non-null counts of `rebalancing_jobs.priority`; prints `CDC_ICEBERG {json}`. | The Iceberg side of `cdc-verify`. |
 | `cdc/runner.py`, `cdc/__main__.py` | Host CLI `python -m dockwatch.cdc`: `connect-up` (lost-slot check via `slot_status()`, retention on existing `ops.public.*` via `ensure_cdc_topic_retention()`, compose up `connect`, PUT `infra/connect/ops.json`, wait until the connector is RUNNING and the slot active), `connect-stop`, `reset`, `catchup [--replay]` (→ `data/cdc/catchup.json`), `verify` (→ `data/cdc/verify.json`, exit 1 on any mismatch), `e2e`, `kafka-counts`. Its `guard()` also consults `batch/guard.py` (no Spark or Connect beside Trino). Spark work runs with `docker compose --profile cdc-apply run --rm --no-deps cdc-apply …`; the output is echoed and the marker lines parsed. `e2e` records each step's time, the compose services running, and peak MiB per container (`docker stats` every ~3 s) in `data/cdc/e2e-report.json`. | One entry point for the tasks; the report is the evidence. |
 | `alerts/handler.py` | `format_alert()` (plain English, Pacific time) and `lambda_handler()` (SNS if `DOCKWATCH_ALERTS_TOPIC_ARN` is set, else prints). | Ready for M6; not deployed. |
-| `batch/guard.py` | **Pure, stdlib only** (tasks.py imports it by path): `refusal(task, running)`: `batch-up`, `scheduler-up`, `iceberg_maintenance`, `partition_evolution_demo`, `trip_history_monthly`, `marts_daily` and `pipeline_health` refuse while `status-stream`, `cdc-apply` or `connect` runs; `stream`, `catchup`, `inspect`, `verify-lake`, `sql`, `connect-up` and the CDC tasks refuse while `trino` runs (the message names Trino and `python tasks.py batch-stop`); `cdc_slot_keepalive` refuses beside `status-stream`, `cdc-apply` or `trino`. `running_services()`: `docker ps` by compose labels. | One heavy JVM family at a time on this host. |
+| `batch/guard.py` | **Pure, stdlib only** (tasks.py imports it by path): `refusal(task, running)`: `batch-up`, `scheduler-up`, `iceberg_maintenance`, `partition_evolution_demo`, `trip_history_monthly`, `marts_daily` and `pipeline_health` refuse while `status-stream`, `cdc-apply` or `connect` runs; `stream`, `catchup`, `inspect`, `verify-lake`, `sql`, `connect-up` and the CDC tasks refuse while `trino` runs (the message names Trino and `python tasks.py batch-stop`); `cdc_slot_keepalive` refuses beside `status-stream`, `cdc-apply` or `trino`; `lineage-up` (`LINEAGE_TASKS`) refuses beside `trino`, `status-stream`, `cdc-apply` or `connect` (`LINEAGE_BLOCKERS`), and every one of the tasks above refuses while `marquez-api` runs (the message names Marquez and `python tasks.py lineage-stop`). `running_services()`: `docker ps` by compose labels. | One heavy JVM family at a time on this host; Marquez is a JVM too. |
+| `batch/lineage.py` | **Stdlib only** (Loop M): `LINEAGE`, what each of the 8 batch tasks reads and writes as OpenLineage (namespace, name) pairs (`table()`: `trino://trino:8080` + `lake.<schema>.<table>`; `repo_file()`: `file` + the repo-relative path; `s3()`: `s3://<bucket>` + key or prefix); `annotate(dag)` (the DAG files' last line) sets each planned task's `inlets` / `outlets` to `openlineage.client.event_v2.Dataset`s (imported lazily; a planned task missing from the DAG raises at parse time); the replay: `dag_run_of()` (a task event's DAG run from its `parent` facet, a DAG event's from itself, else not an Airflow event), `newest_runs()` (per DAG the run with the latest parsed `eventTime`, sorted by time), `replay()` (POSTs them to `/api/v1/lineage`; the first non-2xx answer or a connection error stops it with a `ReplayError` naming the status, body and file, or `lineage-up`). | `airflow.lineage.entities.Table` would be silently ignored by the provider; the names join with dbt-trino's and a later dbt or Spark integration. |
 | `batch/maintenance.py` | **Pure:** the 16 tables (`TABLES`: the 9 core tables; `BATCH_TABLES`: `bronze.trips`, `bronze.station_information`, `metrics.trip_loads`, the three marts and `metrics.pipeline_minutely`; `ALL_TABLES` = both), the retention / size checks (below `1d` refused), the Trino SQL (`ALTER TABLE … EXECUTE optimize / expire_snapshots / remove_orphan_files`), the measurement query (files, bytes, delete files, rows, snapshots, partitions from `$files` / `$snapshots` / `$partitions`), `maintain()` (measure → three steps → measure; a changed row count raises; a batch table missing from `information_schema` returns a `skipped` row instead, while a missing core table still fails; `IDENTITY_PARTITIONS` tables, i.e. `bronze.trips`, optimize only the `trip_month` partition with the most files, and nothing when every partition has one file), the row and the one-INSERT SQL for `lake.metrics.maintenance_runs`; `orphan_files_removed` comes from the `deleted_files_count` metric row Trino 483 returns. | Tested with a fake Trino. |
 | `batch/evolution.py` | **Pure:** lab-table DDL, one INSERT per UTC hour, the evolve and optimize SQL, `pick_days()` (two newest UTC days with ≥ 20 hours, else the two biggest), `summarize()` of `$files` rows per spec, the report. | Tested on fixtures. |
 | `batch/slot.py` | `decide()` (pure: `lost` → fail, never reset; retained ≥ `catch_up_above_mb` or no catch-up for `max_hours_between_catchups` → catch up; else skip), `inspect_slot()` (psycopg on `pg_replication_slots`), `catch_up()` (`docker start` the existing compose `connect` container found by labels, wait for the connector RUNNING and the slot to confirm the start LSN with < 16 MiB retained, always `docker stop`), `slot_health.jsonl` lines. | Never creates containers or runs compose. |
@@ -337,7 +376,7 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 | `batch/expectations.py` | **Pure, stdlib only** (Great Expectations, Loop L): the suite `silver_station_status` (`EXPECTATIONS`: GE type, column key, kwargs, blocking, plain-English label), `gx_kwargs()` / `column_key()`, the batch (`window()` = the 24 hours ending at silver's newest `snapshot_ts`; `query()` = the query asset with `bikes_plus_docks` and `age_s` against a fixed `now` literal), `results()` (GE results in any order → one row per suite entry: `ok`, else `fail` if blocking, else `warn`; a missing result never passes; a min reported as text becomes a number), `results_doc()` (`data/quality/expectations.json`, format 1), `read_results()` and `merge_gate()` (the quality-gate rule below). | Host-tested without GE; importable by both Airflow's python and the GE venv. |
 | `batch/gx_run.py` | Run by the GE venv only (`/opt/gx-venv/bin/python -m dockwatch.batch.gx_run`): an ephemeral GE context, an SQL datasource `trino://dockwatch@trino:8080/lake` with `create_temp_table=False`, the query asset, the suite, a ValidationDefinition and the Checkpoint `marts_daily_quality` (`SUMMARY`), then the results document written atomically. `frame` mode runs the same suite on small pandas frames (the Airflow-image test). It works around a GE 1.24 gap: GE finds no columns in a Trino query asset (its Trino fallback looks the FROM table up in `information_schema`, so derived columns are missing and every column check fails), so `reflect_trino_queries()` reads the names from `SELECT * FROM (<query>) LIMIT 0`. Imports GE, never `dockwatch.config` (the GE venv has no pydantic-settings). | GE's dependencies (SQLAlchemy 2, pandas 3) cannot share Airflow's environment. |
 | `batch/dag_tasks.py`, `batch/runstate.py`, `batch/airflow_logging.py` | Run inside the Airflow image: the DAG callables (Trino client, Docker SDK, `AirflowFailException` for guard failures); the real state of a `dags test` run (`DAG_TEST_STATE` line); Airflow's logging config with alembic's INFO lines off (they were printed to stdout ahead of `-o json`). | DAG files stay thin. |
-| `batch/host.py`, `batch/__main__.py` | Host CLI `python -m dockwatch.batch`: `batch-up`, `batch-stop`, `airflow`, `dag-test`, `test-airflow`, `scheduler-up`, `scheduler-stop`, `trino-sql`. Every compose call runs from the inherited working directory with `--no-deps`. `dag-test` refuses while another `airflow-cli` container runs. `ensure_image()` rebuilds the Airflow image when the hash of its build inputs (`BUILD_INPUTS`: the Dockerfile, `dbt-requirements.txt` and `gx-requirements.txt`) differs from the image label `dockwatch.build-hash`. | Like `dockwatch.cdc`. |
+| `batch/host.py`, `batch/__main__.py` | Host CLI `python -m dockwatch.batch`: `batch-up`, `batch-stop`, `airflow`, `dag-test`, `test-airflow`, `scheduler-up`, `scheduler-stop`, `trino-sql`, `lineage-up`, `lineage-replay`, `lineage-shot [out]`, `lineage-stop` (see *Lineage*). Every compose call runs from the inherited working directory with `--no-deps`. `batch_up()` and `airflow_db_up()` (so `dag-test` and `scheduler-up`) create `data/lineage` for the OpenLineage file transport. `dag-test` refuses while another `airflow-cli` container runs. `ensure_image()` rebuilds the Airflow image when the hash of its build inputs (`BUILD_INPUTS`: the Dockerfile, `dbt-requirements.txt` and `gx-requirements.txt`) differs from the image label `dockwatch.build-hash`. | Like `dockwatch.cdc`. |
 
 ### Station state rule (one definition, used by Spark, Python and the site legend)
 First match wins: `offline` (not installed, not renting, or no report for 30 min) → `empty` (0 bikes) → `full`
@@ -489,8 +528,10 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
   - `marts_daily` (`@daily`, `catchup=False`): `guard` → `stations` → `dbt_build` (a failed dbt test fails without
     retry) → `quality_gate` (the dbt gate plus the Great Expectations checkpoint, see *Great Expectations*; a failed
     blocking expectation fails without retry, a crashed GE run retries) → `export` (`trigger_rule` all_success;
-    insights format 2). Last runs (2026-10-16, each on a freshly restarted Trino; the second in the full check run):
-    success in 44.5 s and 42.7 s, `airflow-cli` 541 / 634 MiB, Trino 1,717 / 1,694 MiB, the GE run 2.7 / 3.1 s.
+    insights format 2). Last runs (2026-10-16, each on a freshly restarted Trino): Loop L's Checker run 44.0 s,
+    `airflow-cli` 618 MiB, Trino 1,768 MiB, the GE run 3.2 s; with OpenLineage on (Loop M2's Builder run) 47.3 s,
+    `airflow-cli` 617 MiB, Trino 1,733 MiB. Trino's range in this DAG is 1,694–1,768 MiB in the DAG, up to 1,885 MiB
+    with the checks' queries right after it.
     **Operating rule:** run `marts_daily` on a fresh Trino JVM (`batch-stop` then `batch-up`), as its checks do
     (`accept-l-trino-restart`); after the trips stage Trino had sat at up to 2,024 of 2,048 MiB. No limit or JVM
     setting changed.
@@ -597,23 +638,86 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
   failed blocking expectation adds a `gx:` problem and fails the gate, so nothing is exported; a missing or unusable
   results document adds `gx: no results (…)` and fails it too. The dbt keys (`tests`, `tests_passed`, `warnings`)
   keep their meaning.
-- **Last real run** (2026-10-16 12:55 UTC): 382,143 rows from 2026-10-15 12:22:16 to 2026-10-16 12:22:16 UTC; 9 of
-  10 passed with 0 unexpected rows; freshness warned at 1,922 s; 2.7 s inside the task (225 MiB RSS for the GE
-  process in a separate measurement). The check recomputed every result on Trino and found no GE table in the lake.
-  In the full check run (14:02 UTC): 381,554 rows, the same 9 passed, freshness warned at 2,564 s, 3.1 s.
+- **Last checked run** (Loop L's Checker run, 2026-10-16): 382,254 rows, the 9 blocking expectations passed with 0
+  unexpected rows, freshness warned at 2,001 s, 3.2 s inside the task (225 MiB RSS for the GE process in a separate
+  measurement). The check recomputed every result on Trino and found no GE table in the lake.
 
-### Pipeline health (`pipeline_health`, latest run 2026-10-16 12:57 UTC, `dag-test`, 26.8 s)
-- **`health.json`** (`format: 1`, 82,773 B of its 500,000 budget): `generated_at`, `dag_run_id`, `status`
+### Lineage (M5 OpenLineage from Airflow → Marquez, Loop M)
+- **Events:** the three Airflow services run with `AIRFLOW__OPENLINEAGE__DISABLED=false`, namespace `dockwatch` and
+  the **file transport** `{"type": "file", "log_file_path": "/opt/dockwatch/data/lineage/ol", "append": false}`
+  (the image's own default stays disabled, so `test-airflow` runs without it). Every DAG run and task run writes its
+  events while Marquez is down, one JSON file each (`data/lineage/ol-<time>.json`, ~7 KB): START and COMPLETE per
+  task and the DAG's COMPLETE (`dags test` emits no DAG START). A task event names its DAG run in its `parent` facet.
+  The transport never creates the folder and loses events without it, so `batch-up` / `airflow_db_up` create it.
+  The other three DAGs (`iceberg_maintenance`, `partition_evolution_demo`, `cdc_slot_keepalive`) emit job events
+  without datasets: they rewrite files in place, write lab tables or touch the ops db.
+- **Forked emitters and the at-fork GC freeze (Loop M2):** provider 2.11.0 sends every task event from an `os.fork()`
+  of the multi-threaded Airflow process (the child emits, then `os._exit(0)`); only its 10 s timeout is configurable,
+  and the parent logs nothing when the child dies. Once a GC pass in that child freed a pyarrow `S3FileSystem` that a
+  pyiceberg write had left as cyclic garbage; its curl destructor joined a resolver thread that exists only in the
+  parent: SIGSEGV, a lost START event and a ~1.8 GB WSL crash dump. So importing `batch/lineage.py` (every annotated
+  DAG file does, and `dags test` parses the whole folder) registers
+  `os.register_at_fork(before=gc.freeze, after_in_parent=gc.unfreeze)`: a forked child never collects objects it
+  inherited (its own new objects are collected as usual), and the parent unfreezes right after the fork and collects
+  its garbage as before. Both calls are O(1); Windows has no `register_at_fork`, so the host skips it. Keep it while
+  the provider forks.
+- **What each batch task reads and writes** (`batch/lineage.py`, set by `lineage.annotate(dag)`; the guards and the
+  `published` sensor have none):
+
+  | Job | Reads | Writes |
+  |---|---|---|
+  | `trip_history_monthly.download` | `s3://baywheels-data` `tripdata` | `data/trips/zips` |
+  | `trip_history_monthly.load` | `data/trips/zips` | `lake.bronze.trips`, `lake.metrics.trip_loads` |
+  | `marts_daily.stations` | `s3://dockwatch` `raw/gbfs/station_information` | `lake.bronze.station_information` |
+  | `marts_daily.dbt_build` | every dbt source: `lake.silver.station_status`, `silver.availability_5m`, `silver.station_episodes`, `bronze.trips`, `bronze.station_information` | the three marts, `data/dbt/target/run_results.json` |
+  | `marts_daily.quality_gate` | the three marts, `lake.silver.station_status` (the GE batch), `silver.availability_5m` (freshness), `run_results.json` | `data/dbt/quality_gate.json`, `data/quality/expectations.json` |
+  | `marts_daily.export` | the three marts, `quality_gate.json` | `web/data/insights` |
+  | `pipeline_health.minutely` | `lake.silver.station_status` | `lake.metrics.pipeline_minutely` |
+  | `pipeline_health.export` | `metrics.pipeline_minutely`, `silver.station_status`, `metrics.maintenance_runs`, `quality_gate.json`, `expectations.json`, `run_results.json` | `web/data/health.json` |
+
+  Lake tables are named the Trino way (`trino://trino:8080`, `lake.<schema>.<table>`), files by repo path (`file`),
+  S3 by bucket and key.
+- **dbt without openlineage-dbt:** its processor takes a model's inputs from dbt's `parent_map` and does not resolve
+  ephemeral models, and the four `stg_*` models are ephemeral, so each mart would read phantom `lake.marts.stg_*`
+  datasets nobody writes. `dbt_build` carries the dbt sources and marts instead, and an Airflow-image test compares
+  them with `dbt/dockwatch` (`sources.yml`, `models/marts/*.sql`). The dbt venv and the image are unchanged.
+- **Marquez** (compose profile `obs`, on demand): `marquez-db` (`postgres:16-alpine`, 256m), `marquez-api`
+  (`marquezproject/marquez:0.51.1`, `MARQUEZ_CONFIG=marquez.dev.yml`, `SEARCH_ENABLED=false` so no OpenSearch JVM,
+  port 15000, 768m, default JVM heap) and `marquez-web` (`marquezproject/marquez-web:0.51.1`, port 13000, 256m); no
+  volume, so it starts empty every time. Never beside Trino, Spark or Connect, both ways round (`batch/guard.py`).
+- **Tasks:**
+  - `python tasks.py lineage-up`: refuses beside Trino / Spark / Connect, removes any old obs containers, starts the
+    db (`--wait` on its healthcheck), then the api and web, and waits up to 180 s for the API (~10 s here).
+  - `python tasks.py lineage-replay`: reads `data/lineage/ol-*.json`, keeps the **newest run of each DAG** (events
+    grouped by DAG run; the run with the latest `eventTime`, compared as datetimes) and POSTs it in event-time order
+    to `/api/v1/lineage`; the first non-2xx answer (status, body, file) or a connection error (run `lineage-up`)
+    exits 1. Events with neither facet (Spark's, from Loop N) are not replayed yet.
+  - `python tasks.py lineage-shot [out]`: one Playwright CLI screenshot, 1600 × 1000, of
+    `http://localhost:13000/lineage/job/dockwatch/marts_daily.dbt_build?depth=2` once the `data/trips/zips` node is
+    drawn, into `web/img/lineage-batch.png` (98,181 B).
+  - `python tasks.py lineage-stop`: removes the three obs containers and only their anonymous volumes; idempotent.
+- **Last replay** (2026-10-16, Loop M2's Builder run): 84 events, the newest run of each of the six DAGs
+  (`iceberg_maintenance` 37, `partition_evolution_demo` 15, `marts_daily` 11, `trip_history_monthly` 9,
+  `pipeline_health` 7, `cdc_slot_keepalive` 5), 30 jobs in Marquez (the 8 annotated tasks with exactly their
+  datasets; the other tasks and the DAG jobs without). Memory: `marquez-api` 275 MiB, `marquez-db` 71 MiB,
+  `marquez-web` 34 MiB.
+- **Cost in Airflow:** within run-to-run noise. `airflow-cli` with OpenLineage on (Loop M2's Builder run) vs off (its
+  baseline at 2029cfa): `marts_daily` 617 / 628 MiB, `pipeline_health` 379 / 433 MiB, `trip_history_monthly` 545 /
+  616 MiB, `iceberg_maintenance` 301 / 292 MiB; seconds 47.3 / 42.2, 27.8 / 24.8, 32.9 / 31.0 and 42.4 / 36.5 (one
+  `fork` per task event).
+
+### Pipeline health (`pipeline_health`, latest run 2026-10-16 22:55 UTC, `dag-test`, 27.8 s)
+- **`health.json`** (`format: 1`, 82,596 B of its 500,000 budget): `generated_at`, `dag_run_id`, `status`
   (`overall` = the worst of `stream` / `quality` / `maintenance`, each with a detail), `tiles` (`latency_p95_s`,
   `events_per_min`, `lag_records`, `freshness_s`), `minutely` (1,440 rows: minute, events, processed, p50, p95,
   consumer lag), `tables` (every existing maintenance table: last non-`replace` commit, age, files, partitions,
   status), `quality` (the gate, the 28 dbt tests, and `expectations`: `data/quality/expectations.json` unchanged, or
   null before the first run), `compaction` (the newest maintenance run's files / bytes before and after). A copy of
   it is the Playwright fixture `tests/web/fixtures/health.json` (regenerated in Loop L after a real `marts_daily`).
-- **Last run:** status **Degraded** (stream `warn`: the newest row reached silver 34 min before; quality and
-  maintenance `ok`); tiles p95 75,860.6 s (21 h 4 min), 646.0 events/min, consumer lag 0, freshness 2,058 s. Spark
-  runs on demand, so only 7 of the 1,440 minutes processed anything (each `catchup` lands its backlog at once) and
-  latency is the backlog's age. `dag-test` 26.8 s, Trino 1,099 MiB, `airflow-cli` 430 MiB.
+- **Last run:** status **Degraded** (stream `warn`: the newest row reached silver 39 min before; quality and
+  maintenance `ok`); tiles p95 3,039.5 s (50 min 39 s), 646.0 events/min, consumer lag 0, freshness 2,388 s. Spark
+  runs on demand, so only 15 of the 1,440 minutes processed anything (each `catchup` lands its backlog at once) and
+  latency is the backlog's age. `dag-test` 27.8 s, Trino 1,067 MiB, `airflow-cli` 379 MiB.
 - **Trino restart rule:** after the full M4a + M4b sequence (maintenance, evolution, trips, backfill, marts) Trino
   sits at 1.8–2.0 GiB of 2 GiB, so both `marts_daily` and `pipeline_health` are run on a restarted Trino
   (`batch-stop` then `batch-up`), as their checks do. No limit or JVM setting changed.
@@ -690,16 +794,20 @@ tables stay `day()`.
 | `airflow-db` | batch | — | `postgres:16-alpine`, database `airflow`, volume `airflow-db`, `mem_limit: 256m`, `restart: "no"`. Airflow's metadata only; never `ops-db`. |
 | `airflow-scheduler` | batch | — | `dockwatch-airflow:2.11.2` (`infra/airflow/Dockerfile`: `apache/airflow:2.11.2-python3.12` + `trino`, `pydantic-settings`, `pytest` through Airflow's constraints, `psycopg[binary]==3.3.6`, the dbt venv `/opt/dbt-venv` and the Great Expectations venv `/opt/gx-venv`; label `dockwatch.build-hash`; 3.86 GB). The `x-airflow` services mount `./dbt` read-only and `./web/data`, and get the S3 settings. `mem_limit: 1g`; only via `scheduler-up`. |
 | `airflow-webserver` | batch | 18090 | Same image, `AIRFLOW__WEBSERVER__WORKERS=1`, `mem_limit: 1g`; never started by the checks. |
-| `airflow-cli` | airflow-cli | — | Same image, one-shot `docker compose run --rm --no-deps` (`dag-test`, `airflow …`, `db migrate`); `mem_limit: 1g`. |
+| `airflow-cli` | airflow-cli | — | Same image, one-shot `docker compose run --rm --no-deps` (`dag-test`, `airflow …`, `db migrate`); `mem_limit: 1g`. The three Airflow services share the `x-airflow` environment, which turns OpenLineage on with the file transport into `data/lineage` (see *Lineage*). |
+| `marquez-db` | obs | — | `postgres:16-alpine`, database / user / password `marquez` (Marquez's dev config hard-codes them; local only), `pg_isready` healthcheck, `mem_limit: 256m`, `restart: "no"`, no volume. |
+| `marquez-api` | obs | 15000 | `marquezproject/marquez:0.51.1`, `MARQUEZ_CONFIG=marquez.dev.yml`, `POSTGRES_HOST=marquez-db`, `SEARCH_ENABLED=false`; `mem_limit: 768m`, `restart: "no"`, no volume. Flyway 8.5 warns that Postgres 16 is newer than it supports but migrates cleanly. |
+| `marquez-web` | obs | 13000 | `marquezproject/marquez-web:0.51.1` (`MARQUEZ_HOST=marquez-api`, `MARQUEZ_PORT=5000`, `WEB_PORT=3000`); `mem_limit: 256m`, `restart: "no"`. One (dark) theme. Only started by `lineage-up`. |
 | `status-stream` | spark | 4040 (Spark UI) | The M2 streaming job; image `dockwatch-spark:3.5.5` (`infra/spark/Dockerfile`: Spark 3.5.5, Java 17, Iceberg 1.6.1 + AWS bundle, Kafka connector, pandas, pyarrow, pytest); `src/` mounted read-only; checkpoints in volume `dockwatch_checkpoints`; 2 GB memory limit; `restart: "no"` (on demand only). |
 
 ### Website (`web/`), static, no build step
 | Path | What it is |
 |---|---|
-| `index.html` (Live), `insights.html`, `pipeline.html`, `about.html` | Shared shell: skip link, sticky 56 px nav (wordmark, links, freshness pill, theme toggle), full-screen nav overlay below 1120 px, footer with Bay Wheels attribution, "Not affiliated with Lyft or Bay Wheels", GitHub link, "Data through <date>". Live = title + freshness pill, paused banner (with "Replay a day" when `data/replay.json` exists) and the replay banner, KPI tiles, the map card at `#map` (F2) and the alerts rail `[data-alerts-rail]` beside it (F3), plus the phone peek bar after `.live-layout` and the alerts sheet `[data-alerts-sheet]`; Insights (F4) and Pipeline (F4b), below; About has sources and licences. On touch (`pointer: coarse`) every button and link is a ≥ 44 × 44 px hit area (footer links 44 px tall; icon buttons keep their corners via a square `::after`); in-sentence links in About's text are the WCAG inline exception. |
+| `index.html` (Live), `insights.html`, `pipeline.html`, `about.html` | Shared shell: skip link, sticky 56 px nav (wordmark, links, freshness pill, theme toggle), full-screen nav overlay below 1120 px (it fades in: `nav-menu-in`, 320 ms, opacity only, so its top row's touch targets never leave the screen while it opens), footer with Bay Wheels attribution, "Not affiliated with Lyft or Bay Wheels", GitHub link, "Data through <date>". Live = title + freshness pill, paused banner (with "Replay a day" when `data/replay.json` exists) and the replay banner, KPI tiles, the map card at `#map` (F2) and the alerts rail `[data-alerts-rail]` beside it (F3), plus the phone peek bar after `.live-layout` and the alerts sheet `[data-alerts-sheet]`; Insights (F4) and Pipeline (F4b), below; About has sources and licences. On touch (`pointer: coarse`) every button and link is a ≥ 44 × 44 px hit area (footer links 44 px tall; icon buttons keep their corners via a square `::after`); in-sentence links in About's text are the WCAG inline exception. |
 | `insights.html` (F4) | Page header with "See live station status" (hidden while the "not published yet" card shows its own link), then: four KPI tiles with ⓘ definitions (**Time empty** = Σ `minutes_empty` / (Σ `coverage_hours` × 60) over the daily file; **Time full** likewise; **Worst hour** = the Pacific hour with the highest mean `share_empty` over stations, e.g. "1–2 PM"; **Trips per day** = Σ `trips_started_per_day`) and a caption naming the marts; chart cards (`card`: title, a takeaway computed from the data, the chart, a source caption with the window): the **% of time empty heatmap** (a `<table>` of the 25 stations with the highest mean share empty × 24 Pacific hours, each cell's rounded % as text on its `seq-empty` step, a labelled scale 0–5 / 5–15 / 15–30 / 30–50 / > 50 %, scrolling sideways inside a focusable region with the station column sticky), the **rebalancing table** (need_rank 1–20 of the last 7 days: station, rank, hours empty, hours full, episodes, longest empty) and the **trips vs availability scatter** (SVG, one point per station: trips started per day × % of time empty, `role="img"` with a summary; the takeaway compares the busiest and quietest quarter of stations). No status colours. States: skeletons + `aria-busy`; any 404 → "The insights are not published yet." card with a link to Live; any other failure, or a read with no full answer after 10 s → "The insights couldn’t be loaded. Check your connection, then try again." + Retry. No period control: the marts fix the windows (DESIGN_BACKLOG). |
-| `pipeline.html` (F4b) | Page header with "See live station status", then from `data/health.json`: a **status banner** (a status badge = Lucide `circle-check` / `triangle-alert` / `circle-x` + the word Healthy / Degraded / Failing in the status colour, then one line per component: Stream, Data quality, Maintenance with its badge and detail, and "Health as of …"); four stat tiles with ⓘ definitions (**p95 latency**, its sub-line starting with the p95 as a duration, e.g. "21 h 4 min · fetch to silver, …"; **Events per minute**, **Consumer lag**, **Freshness**); chart cards: **latency** (p50 `series-primary` solid, p95 `series-secondary` dashed, the 5 min SLA line in `threshold` with its label, a legend; a minute with no neighbour is drawn as a dot; the y axis "Latency" in one duration unit picked from its maximum: seconds below 2 min, minutes below 2 h, else hours; the takeaway in durations), **events per minute**, **freshness per table** (table, last commit, age, files, status badge), **data quality** (the gate line and every dbt test with Passed / Warning / Failed), **Great Expectations on silver** (a takeaway such as "9 of 10 checks passed; freshness is a warning: Spark runs on demand", a table of every expectation: Check, Column, Result badge Passed / Warning / Failed, Found = unexpected rows, the row count or the newest row's age; a caption with the GE version, suite, rows and when `marts_daily` checked; "No Great Expectations results yet." in a `card-soft` when `quality.expectations` is null or missing) and **compaction** (files before and after per table, as bars with the numbers as text; `skipped` tables say so). Status colours appear only in the badges. States as on Insights: skeletons + `aria-busy`, a 404 → "Pipeline health is not published yet." with a link to Live, other failures or 10 s → message + Retry. No lineage section yet (it arrives with OpenLineage / Marquez). |
-| `css/tokens.css`, `base.css`, `layout.css`, `components.css`, `map.css`, `charts.css` | Tokens from the DESIGN.md front matter (light default; dark via `prefers-color-scheme` or the toggle's `data-theme`); `@font-face`, reset, focus ring, reduced motion; page frame; components (incl. stat tile, segmented control, chip, banner, skeleton, data table with 44 px touch targets, details, bottom sheet, and the alerts rail / alert row / peek bar / alerts sheet with the alert row's container query); the map card, markers, tooltip and legend, and `.live-layout`'s two columns from 1120 px; `charts.css` (Insights): chart cards, the heatmap and its scale (cell text ink, or on-ink on the strongest steps, each ≥ 4.5:1 in both themes), SVG chart gridlines / ticks / points / lines / threshold; and for Pipeline the status badge, status banner, chart legend and compaction bars. |
+| `pipeline.html` (F4b) | Page header with "See live station status", then from `data/health.json`: a **status banner** (a status badge = Lucide `circle-check` / `triangle-alert` / `circle-x` + the word Healthy / Degraded / Failing in the status colour, then one line per component: Stream, Data quality, Maintenance with its badge and detail, and "Health as of …"); four stat tiles with ⓘ definitions (**p95 latency**, its sub-line starting with the p95 as a duration, e.g. "21 h 4 min · fetch to silver, …"; **Events per minute**, **Consumer lag**, **Freshness**); chart cards: **latency** (p50 `series-primary` solid, p95 `series-secondary` dashed, the 5 min SLA line in `threshold` with its label, a legend; a minute with no neighbour is drawn as a dot; the y axis "Latency" in one duration unit picked from its maximum: seconds below 2 min, minutes below 2 h, else hours; the takeaway in durations), **events per minute**, **freshness per table** (table, last commit, age, files, status badge), **data quality** (the gate line and every dbt test with Passed / Warning / Failed), **Great Expectations on silver** (a takeaway such as "9 of 10 checks passed; freshness is a warning: Spark runs on demand", a table of every expectation: Check, Column, Result badge Passed / Warning / Failed, Found = unexpected rows, the row count or the newest row's age; a caption with the GE version, suite, rows and when `marts_daily` checked; "No Great Expectations results yet." in a `card-soft` when `quality.expectations` is null or missing) and **compaction** (files before and after per table, as bars with the numbers as text; `skipped` tables say so), then the static **Lineage** card (no data, no JS, no `aria-busy`, inside the same content container, so it hides with the rest on a 404 or error): a takeaway, a `<figure>` with the Marquez screenshot `img/lineage-batch.png` (`width` / `height` 1600 × 1000, `loading="lazy"`, an alt text saying what the graph shows and that the table lists the same graph) and a caption naming OpenLineage, Marquez 0.51.1 and the capture date, then the same graph as a table (Job, Reads, Writes; one row per batch job, datasets by their OpenLineage names; scrolls inside its focusable region). Status colours appear only in the badges. States as on Insights: skeletons + `aria-busy`, a 404 → "Pipeline health is not published yet." with a link to Live, other failures or 10 s → message + Retry. |
+| `img/lineage-batch.png` | The batch lineage graph from Marquez web (`python tasks.py lineage-shot` after a real replay): 1600 × 1000, 98,181 B (budget 400,000), dark (Marquez web has one theme); it truncates long node labels, which the table under it spells out. |
+| `css/tokens.css`, `base.css`, `layout.css`, `components.css`, `map.css`, `charts.css` | Tokens from the DESIGN.md front matter (light default; dark via `prefers-color-scheme` or the toggle's `data-theme`); `@font-face`, reset, focus ring, reduced motion; page frame; components (incl. stat tile, segmented control, chip, banner, skeleton, data table with 44 px touch targets, details, bottom sheet, and the alerts rail / alert row / peek bar / alerts sheet with the alert row's container query); the map card, markers, tooltip and legend, and `.live-layout`'s two columns from 1120 px; `charts.css` (Insights): chart cards, the heatmap and its scale (cell text ink, or on-ink on the strongest steps, each ≥ 4.5:1 in both themes), SVG chart gridlines / ticks / points / lines / threshold; and for Pipeline the status badge, status banner, chart legend, compaction bars and the lineage figure (full-width image, `height: auto`) and table (wrapping dataset lists). |
 | `js/main.js`, `insights.js`, `pipeline.js`, `about.js` | One ES-module entry per page; each calls `shell.js` (`theme.js`, `nav.js`, `freshness.js`, `util/time.js`). `freshness.js` is the page's only `live.json` poll (60 s; a read that hasn't answered in 10 s is aborted and counts as failed, so the pill says "Paused · No data yet" instead of staying on "Loading…", and Live shows its error with Retry) and broadcasts each result as a `dockwatch:live` event (or `dockwatch:live-error`); every pill render (15 s tick and each refresh) also broadcasts `dockwatch:freshness` with the state, so the Live banner flips with the pill. On pages without the banner it adds a visually hidden `aria-live="polite"` region that announces only transitions: "Live data paused — showing the state at 3:42 PM." and "Live data is back." "Data as of" carries the date when the data is from an earlier Pacific day. |
 | `js/live/live.js` + `states.js`, `kpis.js`, `list.js`, `details.js`, `replay.js` | Live page controller: region (remembered in `localStorage`, mirrored in the URL with `view` and `problems`), `Map | List`, "Show only problems" (every state except `ok`), legend counts from `live.json` `counts[view]`, polite `aria-live` summary only when counts change, paused banner (`freshnessState(generated_at) === "paused"`, > 5 min) with the reason sentence and "Replay a day", skeleton / error (Retry) / empty states; KPI tiles; the sortable list table (rows updated in place by station id, so focus and scroll survive a refresh); tooltip (≥ 600 px) or bottom sheet (phones). `alerts.json` is read at start (independently of `live.json`) and re-read with each refresh, with a 10 s read timeout; an older read never overwrites a newer one. **Replay mode** (`replay.js`): `HEAD data/replay.json` once when the banner first shows (no button if it's missing); on click it fetches the file (30 s read timeout; then the banner says "The replay couldn’t be loaded. Try again later." and the button can be pressed again), decodes frames incrementally into `live.json`-shaped stations (`state_since` / `last_reported` null, "—" in the list, "Replay, state at 7:35 PM" in details) and steps one frame every `step_s × 1000 / 10` ms with `setInterval`, looping at the end. Focus moves to Exit, and back to "Replay a day" on Exit; Escape does not exit. KPI tiles show the frame's Empty / Full / Bikes, Open alerts "—" ("Alerts aren’t part of the replay") and a caption naming the replayed day. Live refreshes during replay update the pill only; the alerts rail shows its replay note. Not in the URL. |
 | `js/live/alerts.js` | The alerts rail (F3): "Open now" (count badge, open alerts by `started`, longest-running first) and "Recently resolved" (by `resolved`, newest first, at most 20); stable sorts. Each row is a `button.alert-row` (`data-episode`, `data-alert-station`): a 12 px state marker, the name (`translate="no"`), "Empty for 34 min" (page clock, counting on with the 15 s tick, also while paused) or "Empty, resolved after 22 min", and "San Francisco · started 3:32 PM" (date added when not today, Pacific). Stations missing from `live.json` get a static `div`. Rows are keyed by `episode_id` and updated in place: text changes only when it differs, rows move only when out of place, a resolving alert moves to the resolved list as the same node, focus goes back to the same episode (or its neighbour) and the body's scroll is kept. States: skeleton rows + `aria-busy` while loading, "No open alerts right now.", "Alerts couldn’t be loaded. Check your connection, then try again." + Retry (only when there is no earlier copy), and the replay note. Desktop (≥ 1120 px): sticky rail under the nav, rows scroll inside, height capped to fit between the nav and the footer. Tablet (600–1119 px): card under the map, body scrolls inside, `@container (min-width: 40rem)` → two columns. Phone: the section isn't shown; the **peek bar** ("61 open alerts" / "1 open alert" / "No open alerts" / "Loading alerts…" / "Alerts couldn’t be loaded"; hidden in replay) opens the alerts sheet (`showModal()`, `is-scroll-locked`), into which the one list body moves; Escape / "Close alerts" return focus to the peek bar; the page gets bottom padding and `scroll-padding-bottom` for the bar. Selecting a row: closes the sheet on phones, switches List → Map, awaits `setRegion()` if the station is in another region, turns "Show only problems" off if needed, then focuses the marker and opens its details. A visually hidden `aria-live="polite"` region in the rail announces new open alerts ("New alert: … is empty." / "3 new alerts."), never on the first read or during replay. |
@@ -730,9 +838,10 @@ Remote state backend commented out until the AWS account exists.
   `cdc-catchup [--replay]`, `cdc-verify`, `cdc-e2e [--seed --events --stations]`, `tf-fmt`, `tf-fmt-check`
   (`terraform fmt -check -recursive -diff`, for CI), `tf-validate`; batch (M4a): `batch-up`, `batch-stop`,
   `airflow <args>`, `dag-test <dag_id> [key=value …]`, `test-airflow`, `scheduler-up`, `scheduler-stop`,
-  `trino-sql "<query>"`; `dbt-compile` (the dbt project compiled offline, also in CI). Before any task, `tasks.py` refuses to run from a path whose casing differs from the
+  `trino-sql "<query>"`; `dbt-compile` (the dbt project compiled offline, also in CI); lineage (Loop M):
+  `lineage-up`, `lineage-replay`, `lineage-shot [out]`, `lineage-stop`. Before any task, `tasks.py` refuses to run from a path whose casing differs from the
   containers' (`compose_cwd_refusal`).
-- **Host tests:** 133 pass, 6 skipped (`python tasks.py test`; the skips are the two `tests/spark` modules and the four `tests/airflow` modules): Great Expectations (`tests/test_expectations.py`, 6, no GE import: the suite covers schema, ranges, uniqueness and freshness with only freshness non-blocking; the batch is the newest 24 hours with a fixed `now`; a real GE result captured on silver (`tests/fixtures/gx/raw_results.json`) becomes ok / warn / fail in any order; a failed blocking expectation fails the gate while freshness only warns; a missing, foreign or incomplete results document fails the gate; health.json carries the expectations block within its budget), pipeline health (`tests/test_health.py`, 5: 1,440 consecutive minutes with events, processed and latency (none when nothing was processed), consumer lag with rows carried into the window and a broker clock ahead of Spark's, the tiles of the last active hour, the stream / table / quality / maintenance thresholds and the worst-of status, every health.json section within its 500,000-byte budget), insights format 2 (`tests/test_insights.py`, 3, through the real `marts_export` task with Trino faked: station and window columns moved out of the rows, every file decodes back to the mart rows, and synthetic marts with every real column at 1,000 stations × 30 dates × 24 hours fit the real 2,000,000-byte budget, daily 1.67 MB, while the format-1 layout does not), maintenance of the batch tables (`tests/test_maintenance_batch.py`, 4: the 16 tables and the DAG mapping, a missing batch table `skipped` without any `EXECUTE` while a missing core table fails, `bronze.trips` optimized one partition per run and not at all when compacted, `skipped` rows not failing `record` while an `error` or a missing row does), trips (`tests/test_trips.py`, 9 plus 1 network test: month keys by `YYYYMM-` prefix, published / missing / pending, legacy and ride headers, a missing or unsafe column refused, both schemas mapped to `bronze.trips` columns, the streamed CSV reader with quotes, CRLF, quoted newlines and a BOM, Pacific times to UTC across DST, the ZIP cache), marts (`tests/test_marts.py`, 8: the quality gate on failed / errored nodes and empty marts, the atomic export with the manifest last, the 2 MB budget and floats rounded to 3 digits, station rows from a GBFS document, SQL literals, `dag-test` refusing beside another `airflow-cli`, the image rebuilt when its inputs change), batch (`tests/test_batch.py`, 22: the 9 maintenance tables, the SQL with its retention parameters, retention below 1 day refused, before / after rows, a changed row count refused, Trino refused beside Spark / Connect and Spark / Connect / `catchup` refused beside Trino, the slot decision (catch up / lost never resets / healthy skips), the keepalive always stopping Connect, touching one captured row only after the connector runs (and again while a confirmed touch leaves the slot pinned; an empty `vans` refused), a keepalive timeout writing a `failed` line with the stuck `confirmed_flush_lsn` and target and failing without retry, the alert line and SNS publish, `default_args`, the evolution summary and day choice, the casing guard refusing a different casing and allowing the creating path or no containers, `dag-test` conf parsing), ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
+- **Host tests:** 139 pass, 7 skipped (`python tasks.py test`; the skips are the two `tests/spark` modules and the five `tests/airflow` modules): lineage (`tests/test_lineage.py`, 6, no Airflow / OpenLineage import, Marquez's HTTP answers monkeypatched: the 8 jobs' datasets follow the Trino / S3 / file naming and match the code's table names; `quality_gate` reads `lake.silver.station_status` besides the marts; the replay keeps the newest run of each DAG by parsed event time (also across UTC offsets) in time order and skips events with neither facet; it posts every event and stops with a clear message on a refused connection (naming `lineage-up`) and on a 422 (status, body, file), also through the CLI's exit 1; Marquez refused beside Trino / Spark / Connect and every Trino / Spark / Connect / keepalive task refused beside Marquez, `catchup` before any compose call, the old messages unchanged; `lineage-up` / `lineage-stop` name only the obs services and refuse before any compose call, `batch-up` refuses beside Marquez, and `batch_up` / `airflow_db_up` create `data/lineage`), Great Expectations (`tests/test_expectations.py`, 6, no GE import: the suite covers schema, ranges, uniqueness and freshness with only freshness non-blocking; the batch is the newest 24 hours with a fixed `now`; a real GE result captured on silver (`tests/fixtures/gx/raw_results.json`) becomes ok / warn / fail in any order; a failed blocking expectation fails the gate while freshness only warns; a missing, foreign or incomplete results document fails the gate; health.json carries the expectations block within its budget), pipeline health (`tests/test_health.py`, 5: 1,440 consecutive minutes with events, processed and latency (none when nothing was processed), consumer lag with rows carried into the window and a broker clock ahead of Spark's, the tiles of the last active hour, the stream / table / quality / maintenance thresholds and the worst-of status, every health.json section within its 500,000-byte budget), insights format 2 (`tests/test_insights.py`, 3, through the real `marts_export` task with Trino faked: station and window columns moved out of the rows, every file decodes back to the mart rows, and synthetic marts with every real column at 1,000 stations × 30 dates × 24 hours fit the real 2,000,000-byte budget, daily 1.67 MB, while the format-1 layout does not), maintenance of the batch tables (`tests/test_maintenance_batch.py`, 4: the 16 tables and the DAG mapping, a missing batch table `skipped` without any `EXECUTE` while a missing core table fails, `bronze.trips` optimized one partition per run and not at all when compacted, `skipped` rows not failing `record` while an `error` or a missing row does), trips (`tests/test_trips.py`, 9 plus 1 network test: month keys by `YYYYMM-` prefix, published / missing / pending, legacy and ride headers, a missing or unsafe column refused, both schemas mapped to `bronze.trips` columns, the streamed CSV reader with quotes, CRLF, quoted newlines and a BOM, Pacific times to UTC across DST, the ZIP cache), marts (`tests/test_marts.py`, 8: the quality gate on failed / errored nodes and empty marts, the atomic export with the manifest last, the 2 MB budget and floats rounded to 3 digits, station rows from a GBFS document, SQL literals, `dag-test` refusing beside another `airflow-cli`, the image rebuilt when its inputs change), batch (`tests/test_batch.py`, 22: the 9 maintenance tables, the SQL with its retention parameters, retention below 1 day refused, before / after rows, a changed row count refused, Trino refused beside Spark / Connect and Spark / Connect / `catchup` refused beside Trino, the slot decision (catch up / lost never resets / healthy skips), the keepalive always stopping Connect, touching one captured row only after the connector runs (and again while a confirmed touch leaves the slot pinned; an empty `vans` refused), a keepalive timeout writing a `failed` line with the stuck `confirmed_flush_lsn` and target and failing without retry, the alert line and SNS publish, `default_args`, the evolution summary and day choice, the casing guard refusing a different casing and allowing the creating path or no containers, `dag-test` conf parsing), ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
   replay builder (`tests/test_replay.py`, 7 tests: full first frame then deltas, the shared `classify()` rule, a
   Pacific day across two UTC partitions, decoded frames equal the snapshots, a synthetic full day of 641 stations ×
   1440 frames at 80 changes per frame fits the 1.5 MB budget with the real writer (1,411,600 bytes), the CLI on an
@@ -780,16 +889,21 @@ Remote state backend commented out until the AWS account exists.
   `quality.expectations` is null or missing; the latency axis in one duration unit with every y label clear of the
   axis title, by measured boxes, at 320 / 390 / 768 / 1440 px for the fixture, a p95 scaled past 100,000 s and one
   under 120 s; the tile's duration sub-line; axe on the card with and without results in light and dark).
+  `tests/web/pipeline-lineage.spec.js`: 4 pass (the static Lineage card with no `aria-busy`, the screenshot loaded
+  with `width` / `height` equal to its real size, an alt text naming the graph's path and the table, the figcaption
+  naming OpenLineage and Marquez 0.51.1, and the card hidden with the content on a 404; the table's 8 jobs with
+  exactly what each reads and writes; no page scroll at 320 / 390 px with the image inside the card at its aspect;
+  axe on the card at 390 / 1440 px in light and dark).
   `tests/web/launch.spec.js`: 3 pass (48 full-page screenshots, `<page>-<width>-<theme>.png` in the test's output
   dir, each with no horizontal scroll, no pixel comparison; Tab reaches every control in DOM reading order on all
   four pages at 1440 px, one stop per radio group, and the nav overlay traps Tab and returns focus on Escape; with
   reduced motion nothing animates for longer than 1 ms after load or after a 60 s refresh).
-  74 Playwright tests in total. Tests route `data/*.json` to `tests/web/fixtures/` (a real
+  78 Playwright tests in total. Tests route `data/*.json` to `tests/web/fixtures/` (a real
   641-station export, `replay.json` built from the real archive with `--step 600`, 51 frames, and in
   `fixtures/insights/` a real format-2 export of `dag-test marts_daily`, 645 stations, and `health.json` from a real
   `dag-test pipeline_health`) and fake time with
   `page.clock`; `data/replay.json` is a 404 unless a test asks for the fixture.
-- **Airflow tests:** 18 pass in the Airflow image (`python tasks.py test-airflow`; 3 in `tests/airflow/test_loopl_gx.py`: `/opt/gx-venv` has exactly the pinned set (GE 1.24.0, SQLAlchemy 2.1.4) while Airflow's python cannot import GE and keeps SQLAlchemy 1.4; the suite in the GE venv passes a clean pandas frame and flags a duplicate row, a negative count, an unknown state, an over-capacity row and an old batch each in exactly their expectation; `marts_quality_gate` runs the checkpoint subprocess and merges it, fails without retry on a failed blocking expectation and retries on a crashed run; 3 in `tests/airflow/test_loopk_dags.py`: `iceberg_maintenance` maps over the 16 tables of `maintenance.ALL_TABLES`, one at a time; `pipeline_health` is `@hourly`, paused, `guard` → `minutely` → `export` with an `sla`; the minute series becomes the Arrow table with `pipeline_minutely`'s types; 5 in `tests/airflow/test_m4b_dags.py`: the two M4b DAGs' shape, the trip month from the param or the data interval, `dbt parse` with `/opt/dbt-venv`, and the Arrow table with `bronze.trips` types; 7 in `tests/airflow/test_dags.py` with a
+- **Airflow tests:** 22 pass in the Airflow image (`python tasks.py test-airflow`; 4 in `tests/airflow/test_loopm_lineage.py`: every task of every DAG carries exactly its planned inlets / outlets as OpenLineage `Dataset`s, read through the provider's `ExtractorManager.convert_to_ol_dataset` (the others none); `dbt_build`'s inputs are every table in `sources.yml` and its outputs the marts in `models/marts/*.sql` in the profile's `lake.marts` (staging stays ephemeral, no `stg_*` dataset); in a subprocess with OpenLineage on and the file transport into a temp dir, the `OpenLineageListener` is registered, the DagBag has no import errors and every DAG round-trips through `SerializedDAG` with its tasks and edges; a fresh interpreter that imports only `batch/lineage.py` leaves a cyclic object with a finalizer and forks: the child's GC pass never finalizes it, the child exits 0 and the parent still finalizes it after its own pass, while the provider's `_fork_execute` still calls `os.fork()`; 3 in `tests/airflow/test_loopl_gx.py`: `/opt/gx-venv` has exactly the pinned set (GE 1.24.0, SQLAlchemy 2.1.4) while Airflow's python cannot import GE and keeps SQLAlchemy 1.4; the suite in the GE venv passes a clean pandas frame and flags a duplicate row, a negative count, an unknown state, an over-capacity row and an old batch each in exactly their expectation; `marts_quality_gate` runs the checkpoint subprocess and merges it, fails without retry on a failed blocking expectation and retries on a crashed run; 3 in `tests/airflow/test_loopk_dags.py`: `iceberg_maintenance` maps over the 16 tables of `maintenance.ALL_TABLES`, one at a time; `pipeline_health` is `@hourly`, paused, `guard` → `minutely` → `export` with an `sla`; the minute series becomes the Arrow table with `pipeline_minutely`'s types; 5 in `tests/airflow/test_m4b_dags.py`: the two M4b DAGs' shape, the trip month from the param or the data interval, `dbt parse` with `/opt/dbt-venv`, and the Arrow table with `bronze.trips` types; 7 in `tests/airflow/test_dags.py` with a
   throwaway SQLite metadata DB): the DagBag imports the six DAGs without errors; every task retries 3 times with
   exponential backoff (1 min, cap 30 min), a timeout and the failure callback, and every last task has an `sla`;
   schedules and `catchup=False`; real `TaskInstance.next_retry_datetime` delays grow 60–120 s, 120–240 s, … up to
@@ -812,7 +926,7 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
 | `Python lint + tests` | `astral-sh/setup-uv` (uv 0.12.11, Python 3.12), `uv sync --locked`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q` (the local commands), then the step "dbt compile (offline, no Trino)": `uv run python tasks.py dbt-compile` | 10 min |
 | `Spark transform tests` | `docker build -t dockwatch-spark:3.5.5 infra/spark`, then `python tasks.py test-spark` (same image and command as locally) | 20 min |
 | `Terraform fmt + validate` | `python tasks.py tf-fmt-check`, `python tasks.py tf-validate` (both in `hashicorp/terraform:1.9`, `init -backend=false`, no AWS credentials) | 10 min |
-| `Playwright suite` | Node 24, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --retries=0` (all 74 tests); uploads `test-results/` (traces) on failure | 30 min |
+| `Playwright suite` | Node 24, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --retries=0` (all 78 tests); uploads `test-results/` (traces) on failure | 30 min |
 | `Playwright repeat (alerts + shell)` | the same setup, then `npx playwright test tests/web/alerts.spec.js tests/web/shell.spec.js --repeat-each 3 --retries=0`, as its own red check if one of them flakes | 30 min |
 
 - **Retries 0:** `playwright.config.js` says `retries: CI ? 1 : 0`, so on GitHub (`CI=true`) a flaky test would pass
@@ -874,7 +988,29 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   `warehouse/bronze/trips-c13d9cb6…/`), plus Loop I's `hive-metastore/` and `raw/trips/` objects. Nothing reads
   them.
 - Airflow's backfill runner can log `DeadlockDetected` on `dag_run` and carry on; the runs still finish.
-- Git: commits are made at the end of each loop, not by tooling during it (latest: `481c2e2`, Loop K; Loop L is not committed yet).
+- Git: commits are made at the end of each loop, not by tooling during it (latest: `2029cfa`, Loop L; Loop M, finished in Loop M2, is not committed yet).
+- **Lineage covers the batch side only:** the Spark jobs (`status_stream`, `cdc/apply.py`) emit nothing yet, so
+  Marquez's graph starts at silver / bronze, not at `gbfs.station_status` (Loop N). Spark's integration names Iceberg
+  tables by storage location, while the Airflow events use Trino names; Loop N has to pick one naming so the graph
+  joins at silver.
+- **Marquez is empty until replayed:** it has no volume, so each `lineage-up` starts empty and `lineage-replay`
+  rebuilds it from `data/lineage` in seconds. A Marquez left running makes `batch-up`, `catchup`, `stream` and the
+  DAG guards refuse; `python tasks.py lineage-stop` first.
+- **`data/lineage` grows by one ~7 KB file per Airflow event** (~25 per `marts_daily` + `pipeline_health` +
+  `trip_history_monthly` set of runs; the 18-task `iceberg_maintenance` writes ~37). Nothing prunes it; it is safe to
+  delete between sessions, since the replay only needs the newest run of each DAG. Two runs with the same logical date
+  (a backfill rerun) share OpenLineage run ids; the replay still picks the latest events and Marquez upserts.
+- **The lineage screenshot is dark on both site themes** (Marquez web has one theme) and truncates long node labels;
+  the table under it is the text alternative (DESIGN_BACKLOG #63).
+- **Trino on the first JVM of a full check run** (maintenance, partition evolution, the trips stages) reached
+  2,022 of 2,048 MiB in Loop M's baseline sampler and 2,021 MiB in Loop M2's Builder run (the maintenance checks),
+  above the 1,950 MiB flag line; OpenLineage runs in the Airflow
+  processes, not in Trino. `marts_daily` and `pipeline_health` run on a restarted JVM. No limit changed; any change
+  needs the user.
+- **A crashed Linux process under WSL leaves a ~1.8 GB dump** in `%LOCALAPPDATA%\Temp\wsl-crashes` (named
+  `wsl-crash-<epoch>-<pid>-<executable>-<signal>.dmp`), and the capture stalls the run for ~6 s. Loop M's crashed
+  OpenLineage child left `wsl-crash-1792180714-62-_usr_local_bin_python3.12-11.dmp` (1.8 GB); deleting it is the
+  user's call. `metric-m2-events` counts the python3.12 dumps and those after the run's first dag-test.
 - **Path casing (Docker on Windows):** the folder is `DockWatch` on disk, but every container was created from Git Bash
   as `/c/Users/brady/coding/dockwatch`. Running Docker Compose from a shell that sees a different casing (cmd.exe,
   PowerShell, Python `shell=True`) makes Compose recreate `ops-db` mid-run, which drops iceberg-rest's catalog
@@ -907,6 +1043,15 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   5 s in `shell.spec.js`. Not reproduced since in ~180 runs after `test-spark` (see DEVLOG). Of the two likely causes,
   the live.json read timeout removes cause (b), a first read that never settles; the keep-alive test server reduces
   (does not remove) cause (a), a module request failing under load; a recurrence now names its cause.
+- **Windows port-allocation fault in local Playwright runs:** on this host a local navigation can rarely fail with
+  `net::ERR_NO_BUFFER_SPACE`, when Windows fails to allocate an ephemeral port for one connect (Tcpip event 4231, "all
+  such ports being in use"; logged on this host since 2025-10-28, before DockWatch). Seen 2 in 34 runs of
+  `accept-alerts-stable` (Loop I, Loop M2); CI (Linux) is unaffected. The loop runner drains TIME_WAIT on :5179
+  (`python .loop/checks/m3/envnet.py wait 180`) right before `accept-alerts-stable` and `accept-web-full-suite`, the
+  two densest checks; that lowers the odds, it does not remove them. U1, decided by the user: a host Playwright check
+  that fails only with `net::ERR_NO_BUFFER_SPACE` is re-run once, at once, and the re-run must pass completely (both
+  logs kept); any other error is a real failure. The fix options (the `tests/web/serve.py` reset-on-close edit, a
+  wider port range, quitting Logitech G HUB or Lenovo's network filter during runs) wait on the user.
 - The paused state can't tell "Spark stopped" from "the whole laptop is off": both mean "the pipeline isn't running"
   to a visitor. An exporter heartbeat would need a supervised exporter (out of scope).
 - Docker Compose warns that volume `dockwatch_checkpoints` "already exists but was not created by Docker Compose";
