@@ -5,7 +5,7 @@
 > For the full history, including what was tried and removed, see [`DEVLOG.md`](DEVLOG.md).
 > For the plan, see [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Last updated:** 2026-10-17 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ (partition
+**Last updated:** 2026-10-19 · **Milestones:** M0 ✅ (except manual AWS steps) · M1 ✅ · M2 ✅ (partition
 evolution done in M4a, on a lab copy) · F1 ✅ · F2 ✅ (plus F-1 / F-2 / touch-target fixes, the paused state and
 44 px touch targets everywhere) · F3 alerts rail ✅ · **F4 Insights ✅** (Loop K: insights format 2 and the Insights
 page) · **F4b Pipeline ✅** (Loop N: with the Great Expectations results and the full lineage card) · **M5 pipeline metrics ✅**
@@ -14,7 +14,7 @@ page) · **F4b Pipeline ✅** (Loop N: with the Great Expectations results and t
 replayed into Marquez on demand) · F5 "Replay a day" ✅, launch tests ✅ (no Lighthouse) · M6 CI (`ci.yml`, on Node 24, with an offline `dbt compile`) ✅ · M3 ✅ (CDC: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg; hardened: WAL cap, lost-slot check, CDC topic retention) · **M4a ✅** (Airflow 2.11.2 + Trino 483 in the `batch` profile:
 `iceberg_maintenance`, `partition_evolution_demo`, `cdc_slot_keepalive`, retries / alerts, path-casing guard) · **M4b ✅**
 (`trip_history_monthly` + a 12-month backfill into `bronze.trips` with pyiceberg, the dbt project on Trino,
-`marts_daily` → `web/data/insights/*.json`) · DESIGN.md v1.0.1
+`marts_daily` → `web/data/insights/*.json`) · **Local measurements in `docs/METRICS.md`** (Loop O, each number with its command; the Athena row waits for AWS) · DESIGN.md v1.0.1
 
 ---
 
@@ -22,10 +22,30 @@ replayed into Marquez on demand) · F5 "Replay a day" ✅, launch tests ✅ (no 
 
 | What | Why | Status |
 |---|---|---|
-| **Local measurements (Loop O):** `docs/METRICS.md` with each number's command: p50 / p95 latency from an hour or more of `stream` (which writes no Spark lineage), sustained throughput replaying an archived day at 10× and 50× into lab tables, small-files counts and Trino query time before vs after compaction, and the crash-restart zero-diff. | The M6 measurements that need no AWS account, and the README's résumé numbers. | Next. |
-| **Needs the user:** the AWS account (M6: S3 + Glue, Athena, Lambda + SNS, `terraform plan` in CI, `deploy.yml`, METRICS.md), pushing Loop K, Loop L, Loop M and Loop N and checking their GitHub runs, Lighthouse on the deployed site, the human-eye checks (greyscale, a look at the 48 launch screenshots, the live alert timing, how the expectations card, the dark Marquez screenshot of the full graph (also `docs/img/lineage.png`) and the Spark job list in the lineage card look), the design calls in DESIGN_BACKLOG (#58 latency scale, #62 heatmap minimum coverage, #63 / #65 the lineage card, #64 the nav overlay's fade), optional approvals (renaming `web/img/lineage-batch.png`, which a frozen test pins; Spark lineage from `stream` too), deleting the 1.8 GB WSL crash dump of Loop M's crashed OpenLineage child | Accounts, approvals and judgment only the user can give. | Waiting for the user. |
+| **A local Lighthouse run (Loop P):** F5's Lighthouse on the Live page from a local static server (accessibility 100 as the check, performance as a measured metric), fixing what it finds. | F5's last local item; the deployed-site run stays with the user. | Next. |
+| **Needs the user:** the AWS account (M6: S3 + Glue, Athena, Lambda + SNS, `terraform plan` in CI, `deploy.yml`, the Athena row of `docs/METRICS.md`), pushing Loop K, Loop L, Loop M, Loop N and Loop O and checking their GitHub runs, Lighthouse on the deployed site, the human-eye checks (greyscale, a look at the 48 launch screenshots, the live alert timing, how the expectations card, the dark Marquez screenshot of the full graph (also `docs/img/lineage.png`) and the Spark job list in the lineage card look), the design calls in DESIGN_BACKLOG (#58 latency scale, #62 heatmap minimum coverage, #63 / #65 the lineage card, #64 the nav overlay's fade), optional approvals (renaming `web/img/lineage-batch.png`, which a frozen test pins; Spark lineage from `stream` too), deleting the 1.8 GB WSL crash dump of Loop M's crashed OpenLineage child and Loop O's lab data (`lake.lab_bronze.*` / `lake.lab_silver.*`, `gbfs.alerts.lab`, `dockwatch.station_state.lab`, the replayed records in `gbfs.station_status.replay`, `/checkpoints/lab/`), optionally a shorter trigger for lower latency (a design call) | Accounts, approvals and judgment only the user can give. | Waiting for the user. |
 
-Done most recently: **Loop N: the OpenLineage Spark listener in catch-up runs, one naming with the Airflow
+Done most recently: **Loop O: local measurements in `docs/METRICS.md`, each with its command, and the lab mode
+of the streaming job** (see *Running right now*, *Iceberg tables*, *Kafka topics* and *Tooling and tests* below).
+- **Latency, an hour of `stream`** (`measure window`, 63 min, 60 micro-batches): fetch to silver p50 / p95 59.3 s /
+  60.9 s, fetch to queryable (the committed snapshot) p50 / p95 64.1 s / 68.7 s, micro-batch p95 9.6 s, 647
+  events/min, fetch to Kafka p50 0.3 s (the clock check). The producer's 60 s poll and the 60 s trigger were in
+  phase, so each snapshot waited almost a full trigger.
+- **Throughput, the archived day 2026-10-16 replayed into lab tables:** 10× (its first 240 snapshots) 6,294
+  events/min, batch max 9.7 s; 50× (all 782) 30,757 events/min, batch max 11.2 s; both sustained within the 60 s
+  trigger, fetch to silver p95 58.7 s / 56.9 s, achieved speeds 9.81× / 48.0×.
+- **Compaction** (`measure files` on fresh Trino JVMs around `iceberg_maintenance`): silver 419 → 11 files, the
+  station query's median 287 → 163 ms; bronze 79 → 11 files.
+- **Crash-restart** (`python tasks.py crash-restart`): SIGKILL with a silver micro-batch in flight, then catchup and
+  `verify-lake`: 0 duplicates, 0 missing offsets.
+- **The lab mode:** `stream-lab` / `stream-lab-stop` run the same job on `lake.lab_bronze` / `lake.lab_silver`, the
+  `.lab` topics and `/checkpoints/lab/<UTC>` (Settings `namespace_prefix`, `starting_offsets`; `run_mode.table()`,
+  `run_mode.lab_refusal()`); `replay` paces by schedule with `--skip` / `--limit`; `measure window` / `measure files`
+  read Trino over HTTP; `stream` now refuses while any status-stream container runs.
+- The README has a Results section; the Athena bytes-scanned row waits for the AWS account. `tests/test_measure.py`
+  (11 host tests).
+
+Before that: **Loop N: the OpenLineage Spark listener in catch-up runs, one naming with the Airflow
 lineage, and the full graph from `gbfs.station_status` to every mart** (see *Lineage*, *Local stack* and *Website*
 below). Its first Checker run stopped on two host-memory gates (see *Known gaps*), and Loop N2 restored the tree
 byte-exact and re-verified it.
@@ -254,8 +274,8 @@ Before that: the Iceberg catalog on Postgres is **verified** (`python tasks.py v
 offset in bronze exactly once, 0 gaps, 0 silver duplicates, fresh commits on all four tables), and Spark now runs
 **on demand** (`catchup` / `stream`), never restarted by Docker. Details in DEVLOG 2026-10-08.
 
-Next: local measurements in METRICS.md (Loop O) and a local Lighthouse run (Loop P); M6 and the deployed-site parts
-of F5 need the user (see *Working on now*).
+Next: a local Lighthouse run (Loop P); M6 (including the Athena row of `docs/METRICS.md`) and the deployed-site
+parts of F5 need the user (see *Working on now*).
 
 ### Running right now on this machine
 | Process | How it was started | Stop with |
@@ -264,6 +284,7 @@ of F5 need the user (see *Working on now*).
 | Exporter | `uv run python -m dockwatch.exporter` (log: `data/exporter.log`) | Ctrl+C / kill the process |
 | Stream stack | `python tasks.py up stream` | `python tasks.py down` |
 | Spark streaming job | **Not running** (on demand only). Container `status-stream` has `restart: "no"`. | — |
+| Spark lab stream (`dockwatch-stream-lab`) | **Not running** (on demand only: `python tasks.py stream-lab`, one `compose run -d --rm` container of the `status-stream` service in lab mode; removed when stopped). | `python tasks.py stream-lab-stop` |
 | Kafka Connect (Debezium) | **Not running** (on demand only: `python tasks.py connect-up` or `cdc-e2e`). Container `connect` has `restart: "no"`. | `python tasks.py connect-stop` |
 | Spark CDC apply (`cdc-apply`) | **Not running**; started by `cdc-catchup` / `cdc-verify` / `cdc-reset` with `docker compose run`, exits when done. | — |
 | Trino + `airflow-db` | **Not running** (on demand only: `python tasks.py batch-up`; `restart: "no"`). | `python tasks.py batch-stop` |
@@ -273,12 +294,13 @@ of F5 need the user (see *Working on now*).
 Spark on demand: `python tasks.py catchup` processes everything in Kafka since the last run (`availableNow`) and
 exits (~30 s for a few minutes of backlog; Kafka keeps 7 days). `python tasks.py stream` keeps it running (one
 micro-batch per minute) until `python tasks.py stream-stop`. Run one Spark JVM at a time: stop `stream` before
-`catchup`, `verify-lake`, `inspect`, `sql` or `test-spark`. `live.json` only moves forward while Spark runs (the exporter
+`catchup`, `verify-lake`, `inspect`, `sql` or `test-spark`; `stream`, `catchup`, `stream-lab` and `crash-restart` refuse while any
+status-stream container (a lab run included) runs. `live.json` only moves forward while Spark runs (the exporter
 skips rewriting it while `data_as_of` stands still), so run `catchup` before looking at the exporter output.
 `catchup` also runs the OpenLineage Spark listener (one `spark-*.jsonl` per run in `data/lineage`, see *Lineage*);
 `stream` does not.
 
-Memory: the streaming job uses about 1.5–1.9 GB (limit 2 GB); the rest of the stack under 1 GB. The host often has
+Memory: the streaming job uses about 1.5–1.9 GB (limit 2 GB); in Loop O's hour of `stream` it peaked at 2,022 MiB in docker stats (~1,855 MiB RSS, the rest page cache), and the lab stream at 2,033 MiB at 10× and 2,005 MiB at 50×, none OOMKilled. The rest of the stack is under 1 GB at start (s3 grows with the data: 750–1,087 MiB in Loop O's campaign, redpanda 516–620). The host often has
 only ~1–3 GB free; the 24/7 job stalled there (driver heartbeat timeout), which is why it is now on demand.
 Kafka Connect peaks at ~520 MiB (`mem_limit: 1g`, heap `-Xmx512m`) and the CDC apply at ~1.2 GB (`mem_limit: 2g`);
 Connect and a Spark JVM never run together (the CDC tasks and `catchup` refuse). Trino (`mem_limit: 2g`, heap 1 GB;
@@ -344,6 +366,13 @@ Airflow (LocalExecutor, metadata in airflow-db) ──(DAG tasks, HTTP)──►
 
 python tasks.py catchup ──(openlineage-spark listener, file transport)──► data/lineage/spark-dockwatch-status-stream-<UTC>.jsonl
 
+Lab (Loop O, on demand; never production): raw archive ──(python tasks.py replay --date … --speed N [--skip --limit],
+        paced by the feed's schedule)──► Kafka gbfs.station_status.replay
+gbfs.station_status.replay ──(status_stream in lab mode: python tasks.py stream-lab, startingOffsets latest,
+        checkpoints /checkpoints/lab/<UTC>)──► lake.lab_bronze.station_status, lake.lab_silver.station_status /
+        availability_5m / station_episodes, Kafka gbfs.alerts.lab, dockwatch.station_state.lab
+Trino (HTTP) ──(python tasks.py measure window / measure files)──► data/metrics/*.json ──► docs/METRICS.md
+
 Lineage (on demand; Marquez never beside Trino, Spark or Connect):
 data/lineage/ol-*.json + spark-*.jsonl ──(python tasks.py lineage-replay: the newest run of each DAG, then the newest
         catch-up with lineage, Iceberg tables renamed to their Trino names; each in event-time order)──►
@@ -372,15 +401,16 @@ Host code runs on Python 3.12 (uv). Code under `streaming/` and `cdc/` also runs
 
 | Module | What it does | Why it's built this way |
 |---|---|---|
-| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, `spark_lineage_dir` (the OpenLineage Spark listener's folder; empty = off, only `catchup` sets it), ops database / CDC (`ops_db_dsn`, `connect_url`, `cdc_namespace`, `cdc_topic_pattern`), batch (`trino_url`, `alerts_topic_arn`), state thresholds, exporter. | Switching to AWS is a config change. |
+| `config.py` | One `Settings` object from env / `.env` (prefix `DOCKWATCH_`): target, GBFS, Kafka topics, S3, Iceberg, checkpoints, trigger seconds and `trigger_mode` (`processing_time` / `available_now`), watermark, `spark_lineage_dir` (the OpenLineage Spark listener's folder; empty = off, only `catchup` sets it), `namespace_prefix` ("" = production tables; `lab_` = `lake.lab_bronze` / `lake.lab_silver`, set by `stream-lab`) and `starting_offsets` (`earliest`, or `latest` for a lab run), ops database / CDC (`ops_db_dsn`, `connect_url`, `cdc_namespace`, `cdc_topic_pattern`), batch (`trino_url`, `alerts_topic_arn`), state thresholds, exporter. | Switching to AWS is a config change. |
 | `gbfs/models.py`, `gbfs/client.py` | Typed GBFS records (unknown fields kept); discovery → GBFS 2.3; re-discover on 404; custom User-Agent. | Feeds move and grow. |
-| `producer/` | `messages.py` (explode per station, DLQ rejects, order-insensitive content hash), `archive.py` (gzip JSON to S3 or a folder), `kafka.py` (topic specs, idempotent publisher), `poller.py` (ttl-paced poll loop), `__main__.py` (`run`, `once`, `setup`, `replay`). | Keyed by station for per-station ordering; idempotent to avoid retry duplicates. |
+| `producer/` | `messages.py` (explode per station, DLQ rejects, order-insensitive content hash), `archive.py` (gzip JSON to S3 or a folder), `kafka.py` (topic specs, idempotent publisher), `poller.py` (ttl-paced poll loop), `__main__.py` (`run`, `once`, `setup`, `replay`: an archived day to `<topic>.replay` at N× speed, paced by the feed's schedule, `--skip` / `--limit` for a slice in time order). | Keyed by station for per-station ordering; idempotent to avoid retry duplicates. |
 | `streaming/episodes.py` | **Plain Python:** `Thresholds`, `classify()` (station state rule), `EpisodeState` + `advance()` (episode/alert state machine). | Unit-tested without Spark; the Spark rule is tested to give the same answers. |
 | `streaming/transforms.py` | Spark: `parse_kafka()`, `with_state()`, `to_silver()`, `availability_windows()`. | Pure DataFrame functions, tested on tiny inputs. |
-| `streaming/lake.py` | Spark/Iceberg session config (`local` = REST catalog + SeaweedFS, `aws` = Glue) plus `run_mode.lineage_conf()`, table DDL, `migrate()` for schema evolution (`EVOLUTIONS` list). | Tables evolve in place; fresh and old installs share one history. |
-| `streaming/run_mode.py` | `trigger_options()`: `processingTime` every `trigger_seconds`, or `availableNow`; `lineage_conf(s, app, now)`: `{}` without `spark_lineage_dir`, else the OpenLineage listener, the file transport at `<dir>/spark-<app>-<UTC>.jsonl` and namespace `dockwatch-spark`. No pyspark import. | Host-testable. |
-| `streaming/status_stream.py` | The streaming job (four queries, see flow above). In `available_now` mode it waits for every query to drain Kafka, then exits (non-zero if a query failed). | One app keeps memory low; separate checkpoints recover independently; both modes share them. |
+| `streaming/lake.py` | Spark/Iceberg session config (`local` = REST catalog + SeaweedFS, `aws` = Glue) plus `run_mode.lineage_conf()`, table DDL (`ddl(c, prefix)`: the lab namespaces with prefix `lab_`), `migrate()` for schema evolution (`EVOLUTIONS` list, same prefix). | Tables evolve in place; fresh and old installs share one history. |
+| `streaming/run_mode.py` | `trigger_options()`: `processingTime` every `trigger_seconds`, or `availableNow`; `lineage_conf(s, app, now)`: `{}` without `spark_lineage_dir`, else the OpenLineage listener, the file transport at `<dir>/spark-<app>-<UTC>.jsonl` and namespace `dockwatch-spark`; `table(s, name)`: `lake.<namespace_prefix><name>`; `lab_refusal(s)`: refuses a prefix not matching `^[a-z][a-z0-9]*_$`, a lab run with production's checkpoint root or any production topic, and production with `latest`. No pyspark import. | Host-testable. |
+| `streaming/status_stream.py` | The streaming job (four queries, see flow above). It refuses to start on `lab_refusal()` before any JVM, reads `startingOffsets` from the settings and names every table through `run_mode.table()`. In `available_now` mode it waits for every query to drain Kafka, then exits (non-zero if a query failed). | One app keeps memory low; separate checkpoints recover independently; both modes share them. |
 | `streaming/inspect_tables.py`, `streaming/sql.py` | Health/consistency report (counts, freshness, duplicates, Kafka-offset gaps, states, episodes, file sizes); `--check` (`verify-lake`) asserts it and exits 1 on failure (duplicates, offset gaps or missing partitions, silver > 5 min behind bronze, no Iceberg commit in 60 min; `replace` snapshots, i.e. compaction, do not count as commits, so maintenance alone cannot make a stopped stream look fresh). One-off SQL. | Proof for the restart test, the catalog fix and day-to-day checks. |
+| `measure.py` | **Stdlib + `dockwatch.config`** (Loop O): a small Trino HTTP client (`trino()`: POST `/v1/statement`, follow `nextUri`, retry 502 / 503 / 504, raise `TrinoError`; rows and the final stats), `window <table> <from> <to>` (the rows with `processed_ts` in the window: micro-batches paired with their committed `append` snapshots by `added-records`, nearest-rank p50 / p95 / max of fetch to silver, fetch to queryable and batch duration, events per minute over the Kafka span, fetch to Kafka p50, `sustained`) and `files <table> [--runs N]` (files / bytes / partitions, one discarded warm-up and N timed runs of one GROUP BY, the median `elapsedTimeMillis`). One JSON line, saved to `data/metrics/`, exit 1 on a Trino error. | The numbers in `docs/METRICS.md` are reproducible from the lake with one command each. |
 | `exporter/build.py`, `exporter/__main__.py` | Builds `live.json` (641 stations with name, code, lat/lon, region, map view, bikes/e-bikes/docks, state, state since, last reported; counts per view) and `alerts.json` (open alerts longest first, last 20 resolved). Atomic writes. `data_as_of` = newest feed snapshot in the export; `generated_at` = time of the last export whose `data_as_of` advanced (`carry_generated_at`, `has_new_data`). Exports without new data are not written; at start the previous `live.json` is read (`read_previous`), so a restart does not make old data look new. `alerts.json` gets the same `generated_at`. | The static site only reads these files, and its freshness pill reads `generated_at`, so it must not move when the data doesn't. Stations without a `region_id` are placed in a view by coordinates. Edge: with no previous `live.json` (first run), the first export is written with `generated_at` = now, so the site shows Live for up to 2 min on old Kafka data, then goes stale. |
 | `exporter/replay.py` | `python tasks.py replay-export [--date YYYY-MM-DD] [--step 60] [--out web/data/replay.json]`: reads one **Pacific** day of `raw/gbfs/station_status` snapshots from the archive (`FsArchive` / `S3Archive`; both UTC `dt=` partitions, filtered by Pacific date), keeps the last snapshot per `step` bucket, computes each station's state with `classify()` / `capacity_of()` and its view with `view_for()`, and writes `replay.json` atomically (format v1: `stations` with name, code, lat/lon, view, capacity; `frames` of `[index, state, bikes, docks]` groups, frame 0 full, later frames only changed stations; busiest stations get the smallest indices). Station names come from the day's last `station_information` snapshot. Default day: the latest complete Pacific day with snapshots (today if there is none). Prints size, stations and frames; exits non-zero if the day has no snapshots. | Uses the same rule as Spark without a JVM, and the archive the producer already writes. Snapshot by snapshot: only each station's previous value is kept. |
 | `geo/build.py`, `geo/__main__.py` | Map-shape build step: Census cartographic boundary counties (`cb_2023_us_county_500k`, downloaded once to `data/geo/`) → per-view projection, rectangle clip (land kept 320 units beyond the square view box for wide/tall map cards), Douglas–Peucker simplify → `web/geo/<view>.json`. `pyshp` is in uv group `geo`, imported lazily. | Run once; output committed. Stations are projected in the browser with the same params, so new stations need no rebuild. |
@@ -427,6 +457,7 @@ Capacity = bikes + docks, available + disabled. Episodes open on `empty`/`full`;
 | `metrics.trip_loads` | none | one row per trip-month load attempt | `run_id`, `trip_month`, `source_key`, `source_bytes`, `zip_sha256`, `schema_version`, `header`, `csv_rows`, `loaded_rows` (Trino's count after the commit), `bad_timestamps`, `status` (`ok` / `missing` / `error`), `error`, `started_at` / `finished_at`. Written by Trino. |
 | `metrics.pipeline_minutely` | none | one row per minute | `minute` (UTC), `events`, `processed`, `latency_p50_s`, `latency_p95_s`, `lag_records`, `run_id`, `computed_at`. Created by Trino DDL, written by pyiceberg in `pipeline_health` (each run replaces its 1,440-minute window and anything later in one commit, so no minute is there twice). |
 | `marts.mart_station_availability_daily`, `marts.mart_rebalancing_need`, `marts.mart_trips_vs_availability` | none | see *dbt and marts* | Built by dbt (`CREATE OR REPLACE TABLE … AS`) on each `marts_daily` run. |
+| `lab_bronze.station_status`, `lab_silver.station_status`, `lab_silver.availability_5m`, `lab_silver.station_episodes` | as production | as production | Loop O's lab mode (`stream-lab`): the same DDL and evolutions with prefix `lab_`, written only from `gbfs.station_status.replay`; never maintained, so measured windows stay reproducible. The campaign's 10× and 50× replays of 2026-10-16 wrote 660,212 rows to lab bronze and lab silver; each `accept-o-lab-replay` run adds 38,760 (698,972 after the Builder's). Lab data, on the user's deletion list. |
 | `lab.status_partition_evolution` | `day(snapshot_ts)`, then evolved to `hour(snapshot_ts)` | silver's rows for two days | Lab copy for `partition_evolution_demo` (dropped and re-created by each run); not created yet. |
 | `ops.stations`, `ops.docks`, `ops.vans`, `ops.rebalancing_jobs`, `ops.maintenance_tickets` | none | one row per Postgres row | Written only by `cdc/apply.py` (`MERGE INTO`, deletes included); the Postgres columns plus `_lsn`, `_op`, `_source_ts`, `_kafka_offset`, `_applied_ts`; format v2. `rebalancing_jobs.priority` was added by the apply when it first appeared in the change events. After the seeded run: 80 / 1,774 / 4 / 111 / 123 rows. |
 
@@ -772,10 +803,12 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
 - **Cost in Spark:** the catch-up JVM with the listener peaked at 980, 1,227 and 1,283 MiB of 2,048 in Loop N's
   Builder runs (archived catch-ups without it: 1,129–1,414 MiB; the `verify-lake` JVM after each, without it,
   1,400–1,636 MiB), and at 1,595 and 1,430 MiB in its Checker run (above the archived range, on one short run of 5
-  and 3 samples; under the 1,700 MiB flag line). One catch-up (18 min to an hour of backlog): 20 runs, 56–57 events, 272,647–275,004 B (the
+  and 3 samples; under the 1,700 MiB flag line); Loop N2's Checker 1,395 and 1,531 MiB (`verify-lake` 1,468 / 1,627). Loop O's
+  campaign: catch-ups 1,455, 1,695 (after the SIGKILL) and 1,261 MiB, `verify-lake` 1,459; the hour of `stream` (no
+  listener) 2,022 MiB and the lab stream 2,033 / 2,005 MiB, page cache included. One catch-up (18 min to an hour of backlog): 20 runs, 56–57 events, 272,647–275,004 B (the
   plan-time probe: ~39 events / ~190 KB per micro-batch).
 
-### Pipeline health (`pipeline_health`, latest run 2026-10-16 22:55 UTC, `dag-test`, 27.8 s)
+### Pipeline health (`pipeline_health`, latest run 2026-10-20 03:24 UTC, `dag-test`, 37 s)
 - **`health.json`** (`format: 1`, 82,596 B of its 500,000 budget): `generated_at`, `dag_run_id`, `status`
   (`overall` = the worst of `stream` / `quality` / `maintenance`, each with a detail), `tiles` (`latency_p95_s`,
   `events_per_min`, `lag_records`, `freshness_s`), `minutely` (1,440 rows: minute, events, processed, p50, p95,
@@ -783,34 +816,37 @@ The tables hold the seeded run's result (80 stations, 1,774 docks, 4 vans, 111 j
   status), `quality` (the gate, the 28 dbt tests, and `expectations`: `data/quality/expectations.json` unchanged, or
   null before the first run), `compaction` (the newest maintenance run's files / bytes before and after). A copy of
   it is the Playwright fixture `tests/web/fixtures/health.json` (regenerated in Loop L after a real `marts_daily`).
-- **Last run:** status **Degraded** (stream `warn`: the newest row reached silver 39 min before; quality and
-  maintenance `ok`); tiles p95 3,039.5 s (50 min 39 s), 646.0 events/min, consumer lag 0, freshness 2,388 s. Spark
-  runs on demand, so only 15 of the 1,440 minutes processed anything (each `catchup` lands its backlog at once) and
-  latency is the backlog's age. `dag-test` 27.8 s, Trino 1,067 MiB, `airflow-cli` 379 MiB.
+- **Last run** (Loop O, right after an hour of `stream`): status **Degraded** (stream `warn`: the newest row
+  reached silver 320 s before, after `stream-stop`; quality and maintenance `ok`); tiles p95 61.2 s, 636.2
+  events/min, consumer lag 0, freshness 320 s, health.json 82,674 B. With the stream running every minute processes
+  one micro-batch and the p95 is about one trigger; after a `catchup` alone it is the backlog's age (hours).
+  `dag-test` 37 s, Trino 1,349 MiB, `airflow-cli` 345 MiB.
 - **Trino restart rule:** after the full M4a + M4b sequence (maintenance, evolution, trips, backfill, marts) Trino
   sits at 1.8–2.0 GiB of 2 GiB, so both `marts_daily` and `pipeline_health` are run on a restarted Trino
   (`batch-stop` then `batch-up`), as their checks do. No limit or JVM setting changed.
 
-### Iceberg maintenance (latest run, 2026-10-15 11:48 UTC, `dag-test iceberg_maintenance`, 36 s)
-16 tables: the 9 core tables and the 7 batch tables (`maintenance.BATCH_TABLES`). Fresh Trino JVM, after a rerun of
-trip month 2026-09 had left that partition with 7 files.
+### Iceberg maintenance (latest run, 2026-10-20 03:22 UTC, `dag-test iceberg_maintenance`, 50 s)
+16 tables: the 9 core tables and the 7 batch tables (`maintenance.BATCH_TABLES`). Fresh Trino JVM, right after Loop
+O's hour of `stream` and its crash-restart (run `manual__2026-10-20T03:22:09+00:00`, cited in `docs/METRICS.md`).
 
 | Table | Files before → after | Snapshots before → after | Rows |
 |---|---|---|---|
-| `bronze.station_status` | 7 → 7 | 5 → 5 | 2,233,502 |
-| `silver.station_status` | 7 → 7 | 7 → 7 | 2,233,502 |
-| `silver.availability_5m` | 7 → 7 | 7 → 7 | 456,730 |
-| `silver.station_episodes` | 7 → 7 | 3 → 3 | 3,463 |
+| `bronze.station_status` | 79 → 11 | 76 → 77 | 3,915,131 |
+| `silver.station_status` | 419 → 11 | 87 → 88 | 3,915,131 |
+| `silver.availability_5m` | 27 → 11 | 87 → 88 | 799,126 |
+| `silver.station_episodes` | 11 → 11 | 73 → 73 | 6,746 |
 | `ops.*` (5 tables) | 1 → 1 each | 8 → 8 each | 80 / 1,774 / 4 / 111 / 123 |
-| `bronze.trips` | 19 → 13 (only `trip_month = 2026-09`, 7 → 1) | 9 → 10 | 5,981,514 |
-| `bronze.station_information` | 1 → 1 | 2 → 2 | 645 |
-| `metrics.trip_loads` | 2 → 1 | 2 → 3 | 91 |
-| `marts.mart_*` (3 tables) | 1 → 1 each | 1 → 1 each | 5,788 / 645 / 15,450 |
-| `metrics.pipeline_minutely` | `skipped` (not created yet) | — | — |
+| `bronze.trips` | 64 → 58 (one `trip_month` partition) | 173 → 174 | 5,981,514 |
+| `bronze.station_information` | 1 → 1 | 6 → 6 | 647 |
+| `metrics.trip_loads` | 15 → 1 | 30 → 31 | 344 |
+| `marts.mart_*` (3 tables) | 1 → 1 each | 3 → 3 each | 7,735 / 647 / 15,528 |
+| `metrics.pipeline_minutely` | 2 → 1 | 2 → 2 | 5,479 |
 
-Peak memory: Trino 1,726 MiB (2 GiB limit), `airflow-cli` 292 MiB. In the full check run at 13:31 UTC (after the
+On the same files the station query `SELECT station_id, count(*), max(snapshot_ts) … GROUP BY station_id` went from
+a 287 to a 163 ms median (`measure files`, a fresh JVM each side). Peak memory: Trino 1,970 MiB (2 GiB limit; above
+the 1,950 flag line, flag only), `airflow-cli` 301 MiB. In the full check run of 2026-10-15 13:31 UTC (after the
 12-month reload) the same rule took `bronze.trips` 64 → 58 files (month 2026-09 only) and `metrics.pipeline_minutely`
-2 → 1, in 31 s with Trino at 1,680 MiB. The first 16-table run of the day optimized all
+2 → 1, in 31 s with Trino at 1,680 MiB. The first 16-table run of that day optimized all
 of `bronze.trips` in one statement (64 → 13 files, 485 → 1 snapshots, 16 s) and took Trino to **2,024 MiB**; a
 run with nothing to compact peaks at 1,273 MiB. So `bronze.trips` is now optimized **one partition per run** (the
 month with the most files, `… EXECUTE optimize(…) WHERE trip_month = DATE '…'`): one month in Trino's writers and
@@ -842,7 +878,8 @@ tables stay `day()`.
 | `gbfs.station_status` | 6 | 7 days | producer (~641 msg/min) |
 | `gbfs.station_information` | 1 | compacted | producer (only on change) |
 | `gbfs.dlq` | 1 | 28 days | producer (0 rows so far) |
-| `gbfs.station_status.replay` | 6 | 7 days | `producer replay` (unused so far) |
+| `gbfs.station_status.replay` | 6 | 7 days | `producer replay` (Loop O's lab runs: 660,212 replayed records of 2026-10-16, plus 38,760 per `accept-o-lab-replay` run); read only by the lab stream |
+| `gbfs.alerts.lab`, `dockwatch.station_state.lab` | 1 each | default (auto-created on first write) | the lab stream's episodes query; lab data |
 | `gbfs.alerts` | 1 | 28 days | Spark episodes query (key `alert_id`, at-least-once) |
 | `dockwatch.station_state` | 1 | compacted | Spark episodes query (key `station_id`) |
 | `ops.public.stations`, `ops.public.docks`, `ops.public.vans`, `ops.public.rebalancing_jobs`, `ops.public.maintenance_tickets` | 1 each | unlimited: `retention.ms=-1`, `cleanup.policy=delete` (from the connector's topic-creation group; set on existing topics by `connect-up`) | Debezium (key = primary key, Debezium envelope as JSON with schemas); deleted by `cdc-reset` |
@@ -908,9 +945,9 @@ Remote state backend commented out until the AWS account exists.
   (`terraform fmt -check -recursive -diff`, for CI), `tf-validate`; batch (M4a): `batch-up`, `batch-stop`,
   `airflow <args>`, `dag-test <dag_id> [key=value …]`, `test-airflow`, `scheduler-up`, `scheduler-stop`,
   `trino-sql "<query>"`; `dbt-compile` (the dbt project compiled offline, also in CI); lineage (Loops M and N; `catchup` also writes the Spark listener's events):
-  `lineage-up`, `lineage-replay`, `lineage-shot [out]`, `lineage-stop`. Before any task, `tasks.py` refuses to run from a path whose casing differs from the
+  `lineage-up`, `lineage-replay`, `lineage-shot [out]`, `lineage-stop`; measurements (Loop O, `docs/METRICS.md`): `stream-lab`, `stream-lab-stop`, `replay --date … --speed N --skip N --limit N`, `crash-restart` (SIGKILL the stream mid-batch, `catchup`, `verify-lake`, `data/metrics/crash-restart-<UTC>.json`; exit 0 only on zero-diff), `measure window <table> <from> <to>`, `measure files <table> [--runs N]`. Before any task, `tasks.py` refuses to run from a path whose casing differs from the
   containers' (`compose_cwd_refusal`).
-- **Host tests:** 146 pass, 7 skipped (`python tasks.py test`; the skips are the two `tests/spark` modules and the five `tests/airflow` modules): Spark lineage (`tests/test_spark_lineage.py`, 7, no pyspark / Airflow / OpenLineage import, on a trimmed real catch-up file `tests/fixtures/lineage/spark-dockwatch-status-stream-20261017T064202Z.jsonl`: the listener off without a lineage dir; one JSON-lines file per run in `dockwatch-spark`; Iceberg tables take the Trino name through the REST symlink while Kafka keeps its name; only runs that read and write are replayed, each streaming write named by its table; the newest catch-up with lineage is posted after the Airflow runs, and a broken line names `file:line`; only `catchup` sets `DOCKWATCH_SPARK_LINEAGE_DIR` and mounts `data/lineage`; a leftover `marquez-db` or `marquez-web` blocks like the API), lineage (`tests/test_lineage.py`, 6, no Airflow / OpenLineage import, Marquez's HTTP answers monkeypatched: the 8 jobs' datasets follow the Trino / S3 / file naming and match the code's table names; `quality_gate` reads `lake.silver.station_status` besides the marts; the replay keeps the newest run of each DAG by parsed event time (also across UTC offsets) in time order and skips events with neither facet; it posts every event and stops with a clear message on a refused connection (naming `lineage-up`) and on a 422 (status, body, file), also through the CLI's exit 1; Marquez refused beside Trino / Spark / Connect and every Trino / Spark / Connect / keepalive task refused beside Marquez, `catchup` before any compose call, the old messages unchanged; `lineage-up` / `lineage-stop` name only the obs services and refuse before any compose call, `batch-up` refuses beside Marquez, and `batch_up` / `airflow_db_up` create `data/lineage`), Great Expectations (`tests/test_expectations.py`, 6, no GE import: the suite covers schema, ranges, uniqueness and freshness with only freshness non-blocking; the batch is the newest 24 hours with a fixed `now`; a real GE result captured on silver (`tests/fixtures/gx/raw_results.json`) becomes ok / warn / fail in any order; a failed blocking expectation fails the gate while freshness only warns; a missing, foreign or incomplete results document fails the gate; health.json carries the expectations block within its budget), pipeline health (`tests/test_health.py`, 5: 1,440 consecutive minutes with events, processed and latency (none when nothing was processed), consumer lag with rows carried into the window and a broker clock ahead of Spark's, the tiles of the last active hour, the stream / table / quality / maintenance thresholds and the worst-of status, every health.json section within its 500,000-byte budget), insights format 2 (`tests/test_insights.py`, 3, through the real `marts_export` task with Trino faked: station and window columns moved out of the rows, every file decodes back to the mart rows, and synthetic marts with every real column at 1,000 stations × 30 dates × 24 hours fit the real 2,000,000-byte budget, daily 1.67 MB, while the format-1 layout does not), maintenance of the batch tables (`tests/test_maintenance_batch.py`, 4: the 16 tables and the DAG mapping, a missing batch table `skipped` without any `EXECUTE` while a missing core table fails, `bronze.trips` optimized one partition per run and not at all when compacted, `skipped` rows not failing `record` while an `error` or a missing row does), trips (`tests/test_trips.py`, 9 plus 1 network test: month keys by `YYYYMM-` prefix, published / missing / pending, legacy and ride headers, a missing or unsafe column refused, both schemas mapped to `bronze.trips` columns, the streamed CSV reader with quotes, CRLF, quoted newlines and a BOM, Pacific times to UTC across DST, the ZIP cache), marts (`tests/test_marts.py`, 8: the quality gate on failed / errored nodes and empty marts, the atomic export with the manifest last, the 2 MB budget and floats rounded to 3 digits, station rows from a GBFS document, SQL literals, `dag-test` refusing beside another `airflow-cli`, the image rebuilt when its inputs change), batch (`tests/test_batch.py`, 22: the 9 maintenance tables, the SQL with its retention parameters, retention below 1 day refused, before / after rows, a changed row count refused, Trino refused beside Spark / Connect and Spark / Connect / `catchup` refused beside Trino, the slot decision (catch up / lost never resets / healthy skips), the keepalive always stopping Connect, touching one captured row only after the connector runs (and again while a confirmed touch leaves the slot pinned; an empty `vans` refused), a keepalive timeout writing a `failed` line with the stuck `confirmed_flush_lsn` and target and failing without retry, the alert line and SNS publish, `default_args`, the evolution summary and day choice, the casing guard refusing a different casing and allowing the creating path or no containers, `dag-test` conf parsing), ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
+- **Host tests:** 157 pass, 7 skipped (`python tasks.py test`; the skips are the two `tests/spark` modules and the five `tests/airflow` modules): measurements and the lab mode (`tests/test_measure.py`, 11, no pyspark / Airflow / OpenLineage / Trino import, Trino and docker faked: nearest-rank percentiles over weighted groups; each micro-batch paired with the snapshot holding its rows, no-data snapshots never, an unpaired batch counted; the window's latencies, batch durations and events per minute from Trino-shaped text; sustained only when every batch is paired and under the trigger; the files measure drops its warm-up run; the Trino client follows `nextUri`, retries a 503 and raises on a query error, and the CLI exits 1; lab names `lake.lab_*`, the production constants equal the Settings defaults, production outputs, unsafe prefixes and production with `latest` refused; `stream-lab` makes one named `compose run` with exactly the lab settings, waits for every query's `sources/0/0`, stops the container when they never appear and refuses beside Spark / Connect / Trino / Marquez; `catchup`, `stream` and `crash-restart` refuse while a lab run holds the JVM; `replay --skip / --limit` on an `FsArchive` keeps its schedule with a fake clock and slow publisher; the crash-restart checkpoint / rpk / verify-lake parsers and the zero-diff rule), Spark lineage (`tests/test_spark_lineage.py`, 7, no pyspark / Airflow / OpenLineage import, on a trimmed real catch-up file `tests/fixtures/lineage/spark-dockwatch-status-stream-20261017T064202Z.jsonl`: the listener off without a lineage dir; one JSON-lines file per run in `dockwatch-spark`; Iceberg tables take the Trino name through the REST symlink while Kafka keeps its name; only runs that read and write are replayed, each streaming write named by its table; the newest catch-up with lineage is posted after the Airflow runs, and a broken line names `file:line`; only `catchup` sets `DOCKWATCH_SPARK_LINEAGE_DIR` and mounts `data/lineage`; a leftover `marquez-db` or `marquez-web` blocks like the API), lineage (`tests/test_lineage.py`, 6, no Airflow / OpenLineage import, Marquez's HTTP answers monkeypatched: the 8 jobs' datasets follow the Trino / S3 / file naming and match the code's table names; `quality_gate` reads `lake.silver.station_status` besides the marts; the replay keeps the newest run of each DAG by parsed event time (also across UTC offsets) in time order and skips events with neither facet; it posts every event and stops with a clear message on a refused connection (naming `lineage-up`) and on a 422 (status, body, file), also through the CLI's exit 1; Marquez refused beside Trino / Spark / Connect and every Trino / Spark / Connect / keepalive task refused beside Marquez, `catchup` before any compose call, the old messages unchanged; `lineage-up` / `lineage-stop` name only the obs services and refuse before any compose call, `batch-up` refuses beside Marquez, and `batch_up` / `airflow_db_up` create `data/lineage`), Great Expectations (`tests/test_expectations.py`, 6, no GE import: the suite covers schema, ranges, uniqueness and freshness with only freshness non-blocking; the batch is the newest 24 hours with a fixed `now`; a real GE result captured on silver (`tests/fixtures/gx/raw_results.json`) becomes ok / warn / fail in any order; a failed blocking expectation fails the gate while freshness only warns; a missing, foreign or incomplete results document fails the gate; health.json carries the expectations block within its budget), pipeline health (`tests/test_health.py`, 5: 1,440 consecutive minutes with events, processed and latency (none when nothing was processed), consumer lag with rows carried into the window and a broker clock ahead of Spark's, the tiles of the last active hour, the stream / table / quality / maintenance thresholds and the worst-of status, every health.json section within its 500,000-byte budget), insights format 2 (`tests/test_insights.py`, 3, through the real `marts_export` task with Trino faked: station and window columns moved out of the rows, every file decodes back to the mart rows, and synthetic marts with every real column at 1,000 stations × 30 dates × 24 hours fit the real 2,000,000-byte budget, daily 1.67 MB, while the format-1 layout does not), maintenance of the batch tables (`tests/test_maintenance_batch.py`, 4: the 16 tables and the DAG mapping, a missing batch table `skipped` without any `EXECUTE` while a missing core table fails, `bronze.trips` optimized one partition per run and not at all when compacted, `skipped` rows not failing `record` while an `error` or a missing row does), trips (`tests/test_trips.py`, 9 plus 1 network test: month keys by `YYYYMM-` prefix, published / missing / pending, legacy and ride headers, a missing or unsafe column refused, both schemas mapped to `bronze.trips` columns, the streamed CSV reader with quotes, CRLF, quoted newlines and a BOM, Pacific times to UTC across DST, the ZIP cache), marts (`tests/test_marts.py`, 8: the quality gate on failed / errored nodes and empty marts, the atomic export with the manifest last, the 2 MB budget and floats rounded to 3 digits, station rows from a GBFS document, SQL literals, `dag-test` refusing beside another `airflow-cli`, the image rebuilt when its inputs change), batch (`tests/test_batch.py`, 22: the 9 maintenance tables, the SQL with its retention parameters, retention below 1 day refused, before / after rows, a changed row count refused, Trino refused beside Spark / Connect and Spark / Connect / `catchup` refused beside Trino, the slot decision (catch up / lost never resets / healthy skips), the keepalive always stopping Connect, touching one captured row only after the connector runs (and again while a confirmed touch leaves the slot pinned; an empty `vans` refused), a keepalive timeout writing a `failed` line with the stuck `confirmed_flush_lsn` and target and failing without retry, the alert line and SNS publish, `default_args`, the evolution summary and day choice, the casing guard refusing a different casing and allowing the creating path or no containers, `dag-test` conf parsing), ops simulator (`tests/test_ops_sim.py`, 7: same seed same ops, job only after 20 min empty, resolved alert closes the job, cancelled jobs deleted, full alerts open nothing, the seeded run touches every table with ≥ 10 job deletes, real `gbfs.alerts` messages parse), CDC (`tests/test_cdc.py`, 16: Connect schema → Iceberg types, a new column plans an ADD COLUMN, a type change is refused, the newest event per key wins by LSN, a delete takes its key from the before image — all on records captured from the real connector in `tests/fixtures/cdc/` — plus checksum order-free and canonical, the Connect / Spark guard, the reset topic list, a lost slot refused with `cdc-reset` in the message, none / reserved / extended allowed, unreserved warns, `connect_up` refuses before compose up and the topic alter, the CLI exits 1 on a lost slot, retention set only on the five ops topics, and `ops.json`'s group covering exactly `ops.public.*` with `retention.ms=-1`), GBFS client, messages/archive, poller, episodes/state rule, exporter (incl. `generated_at` kept without new data and across restarts),
   replay builder (`tests/test_replay.py`, 7 tests: full first frame then deltas, the shared `classify()` rule, a
   Pacific day across two UTC partitions, decoded frames equal the snapshots, a synthetic full day of 641 stations ×
   1440 frames at 80 changes per frame fits the 1.5 MB budget with the real writer (1,411,600 bytes), the CLI on an
@@ -1037,7 +1074,9 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   the host test with every float at full 3 digits) and the trips file at ~0.80 MB; the budget is 2,000,000 B per
   file. The page reads all three files (~0.85 MB today) on every visit; there is no gzip yet.
 - **Pipeline latency reflects on-demand Spark:** silver only gets rows when someone runs `catchup` / `stream`, so most
-  minutes process nothing and a catchup minute's p95 is the backlog's age (hours). `fetched_ts` comes from the
+  minutes process nothing and a catchup minute's p95 is the backlog's age (hours). With `stream` running (Loop O's
+  hour, `docs/METRICS.md`) fetch to silver was p50 / p95 59.3 s / 60.9 s and fetch to queryable 64.1 s / 68.7 s: the
+  60 s poll and the 60 s trigger were in phase, so a snapshot waits up to one trigger, then ~6–10 s to commit. `fetched_ts` comes from the
   Windows host's clock and `processed_ts` from the Docker VM's; a skew between them shifts every latency by that
   many seconds. Consumer lag counts only records already in silver (published before a minute's end, processed
   after it); records not processed at all yet are invisible to the lake, and the freshness tile shows that case.
@@ -1061,7 +1100,7 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   `warehouse/bronze/trips-c13d9cb6…/`), plus Loop I's `hive-metastore/` and `raw/trips/` objects. Nothing reads
   them.
 - Airflow's backfill runner can log `DeadlockDetected` on `dag_run` and carry on; the runs still finish.
-- Git: commits are made at the end of each loop, not by tooling during it (latest: `1e1260a`, Loop M as finished in Loop M2 and verified in Loop M3; Loop N's work sits in the working tree until its commit).
+- Git: commits are made at the end of each loop, not by tooling during it (latest: `0aa1288`, Loop N as finished in Loop N2; Loop O's work sits in the working tree until its commit).
 - **Spark lineage comes from catch-up runs only:** the listener runs in `catchup` (the same queries and tables as
   `stream`), so the graph shows what the streaming job does without `stream` writing events every minute; `stream`
   and the CDC apply emit nothing. Inside `foreachBatch` Spark sees no input, so the episodes MERGE reads only its own
@@ -1135,7 +1174,9 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   with `.loop/checks/n2/hostmem.py`, a local loop-runner helper outside the repo, before the gated chunks (3,300 MiB
   before `batch-up`, 1,700 before the other memgates) and pauses for the user instead of running into a gate. The
   permanent fixes (closing Chrome for runs, `.wslconfig` memory reclaim, dropping the VM's cache, any `mem_limit` /
-  JVM change) are the user's (U2).
+  JVM change) are the user's (U2). Confirmed by Loop N2's Checker with Chrome closed: 6,482 MiB at the start and
+  2,779 / 3,171 MiB at the trips / health gates, every wait reached on its first call. A pause with Trino up now
+  stops Trino first (an idle session at low memory is when the reaper killed the producer / exporter).
 - The paused state can't tell "Spark stopped" from "the whole laptop is off": both mean "the pipeline isn't running"
   to a visitor. An exporter heartbeat would need a supervised exporter (out of scope).
 - Docker Compose warns that volume `dockwatch_checkpoints` "already exists but was not created by Docker Compose";
@@ -1174,8 +1215,13 @@ are pinned to version tags (major tags, and the exact `v10.3.0` for setup-uv, wh
   `numeric`, `date`), stops the apply with `SchemaError`. Columns are add-only; a dropped Postgres column would stay
   in Iceberg (and `cdc-verify` would still compare only Postgres's columns).
 - **Small files:** each streaming query writes ≥ 1 file per minute (silver ≈ 45 KB/file); `iceberg_maintenance`
-  compacts them (405 → 4 silver files in its first run), but only when someone runs it: the scheduler does not run
-  24/7 and the DAGs are paused by default.
+  compacts them (405 → 4 silver files in its first run; in Loop O 419 → 11 silver and 79 → 11 bronze files, the
+  station query's median 287 → 163 ms, `docs/METRICS.md`), but only when someone runs it: the scheduler does not
+  run 24/7 and the DAGs are paused by default.
+- **Lab data stays until the user deletes it:** Loop O's replays left `lake.lab_bronze.*` / `lake.lab_silver.*`
+  (698,972 rows each in `station_status` after the Builder's checks), `gbfs.alerts.lab`, `dockwatch.station_state.lab`, the replayed records in
+  `gbfs.station_status.replay` (7-day retention) and `/checkpoints/lab/<UTC>` dirs in the checkpoints volume. No loop
+  deletes them; each `stream-lab` adds a checkpoint dir and the Checker's lab replay adds ~39,000 rows.
 - **`docker.sock` in the Airflow containers** is root-equivalent access to the Docker VM. Local only; the code only
   lists containers and starts / stops `connect`.
 - `live.json` is ~200 KB uncompressed; fine for now, worth trimming or gzip-serving later (F5).

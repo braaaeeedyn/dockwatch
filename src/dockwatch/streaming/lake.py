@@ -53,43 +53,45 @@ EVOLUTIONS: list[tuple[str, str, str]] = [
 ]
 
 
-def migrate(spark: SparkSession, c: str) -> list[str]:
-    """Add any missing evolved columns (metadata-only in Iceberg: no data files are rewritten)."""
+def migrate(spark: SparkSession, c: str, prefix: str = "") -> list[str]:
+    """Add any missing evolved columns (metadata-only in Iceberg: no data files are rewritten). `prefix` names the
+    lab namespaces (lab_bronze / lab_silver)."""
     done = []
     for table, column, type_ in EVOLUTIONS:
-        if column not in spark.table(f"{c}.{table}").columns:
-            spark.sql(f"ALTER TABLE {c}.{table} ADD COLUMN {column} {type_}")
-            done.append(f"{table}.{column}")
+        if column not in spark.table(f"{c}.{prefix}{table}").columns:
+            spark.sql(f"ALTER TABLE {c}.{prefix}{table} ADD COLUMN {column} {type_}")
+            done.append(f"{prefix}{table}.{column}")
     return done
 
 
-def ddl(c: str) -> list[str]:
-    """CREATE statements, idempotent. `c` is the catalog name."""
+def ddl(c: str, prefix: str = "") -> list[str]:
+    """CREATE statements, idempotent. `c` is the catalog name; `prefix` "lab_" creates lab_bronze / lab_silver."""
+    bronze, silver = f"{c}.{prefix}bronze", f"{c}.{prefix}silver"
     return [
-        f"CREATE NAMESPACE IF NOT EXISTS {c}.bronze",
-        f"CREATE NAMESPACE IF NOT EXISTS {c}.silver",
-        f"""CREATE TABLE IF NOT EXISTS {c}.bronze.station_status (
+        f"CREATE NAMESPACE IF NOT EXISTS {bronze}",
+        f"CREATE NAMESPACE IF NOT EXISTS {silver}",
+        f"""CREATE TABLE IF NOT EXISTS {bronze}.station_status (
             station_id string, num_bikes_available int, num_bikes_disabled int, num_docks_available int,
             num_docks_disabled int, num_ebikes_available int, is_installed boolean, is_renting boolean,
             is_returning boolean, last_reported_ts timestamp, snapshot_ts timestamp, fetched_ts timestamp,
             feed_version string, snapshot_id string, kafka_topic string, kafka_partition int, kafka_offset bigint,
             kafka_ts timestamp, raw_json string)
             USING iceberg PARTITIONED BY (days(snapshot_ts)) {TABLE_PROPS}""",
-        f"""CREATE TABLE IF NOT EXISTS {c}.silver.station_status (
+        f"""CREATE TABLE IF NOT EXISTS {silver}.station_status (
             station_id string, snapshot_ts timestamp, last_reported_ts timestamp, num_bikes_available int,
             num_bikes_disabled int, num_ebikes_available int, num_docks_available int, num_docks_disabled int,
             capacity int, is_installed boolean, is_renting boolean, is_returning boolean, state string,
             fetched_ts timestamp, kafka_ts timestamp, processed_ts timestamp)
             USING iceberg PARTITIONED BY (days(snapshot_ts)) {TABLE_PROPS}""",
-        f"""CREATE TABLE IF NOT EXISTS {c}.silver.availability_5m (
+        f"""CREATE TABLE IF NOT EXISTS {silver}.availability_5m (
             window_start timestamp, window_end timestamp, station_id string, samples bigint, min_bikes int,
             avg_bikes double, max_bikes int, avg_docks double, capacity int, share_empty double,
             share_full double, share_offline double)
             USING iceberg PARTITIONED BY (days(window_start)) {TABLE_PROPS}""",
-        f"""CREATE TABLE IF NOT EXISTS {c}.silver.station_episodes (
+        f"""CREATE TABLE IF NOT EXISTS {silver}.station_episodes (
             episode_id string, station_id string, kind string, start_ts timestamp, end_ts timestamp,
             duration_s bigint, status string, alerted boolean, updated_ts timestamp)
             USING iceberg PARTITIONED BY (days(start_ts)) {TABLE_PROPS}""",
         # Sort order for compaction (M4) and for readers; streaming appends don't re-sort.
-        f"ALTER TABLE {c}.silver.station_status WRITE ORDERED BY station_id, snapshot_ts",
+        f"ALTER TABLE {silver}.station_status WRITE ORDERED BY station_id, snapshot_ts",
     ]

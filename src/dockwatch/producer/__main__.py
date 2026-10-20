@@ -64,26 +64,38 @@ def cmd_setup(_args) -> None:
 
 
 def cmd_replay(args) -> None:
-    """Re-publish an archived day of station_status at N x speed, to the .replay topic by default."""
+    """Re-publish an archived day of station_status at N x speed, to the .replay topic by default. --skip / --limit
+    take a slice of the day's snapshots in time order. Pacing follows the feed's schedule (snapshot k goes out at
+    start + (last_updated_k - last_updated_0) / speed), so time spent publishing does not lower the achieved speed."""
+    if args.skip < 0 or (args.limit is not None and args.limit < 1):
+        raise SystemExit("--skip must be >= 0 and --limit >= 1")
     s = get_settings()
     archive = build_archive(s)
     keys = archive.list_keys(f"raw/gbfs/station_status/dt={args.date}/")
     if not keys:
         raise SystemExit(f"no archived station_status snapshots for {args.date}")
+    day = len(keys)
+    keys = keys[args.skip : None if args.limit is None else args.skip + args.limit]
+    if not keys:
+        raise SystemExit(f"--skip {args.skip} leaves none of the {day} snapshots of {args.date}")
     topic = args.topic or f"{s.topic_station_status}.replay"
     publisher = KafkaPublisher(s.kafka_bootstrap, client_id="dockwatch-replay")
-    start, sent, prev = time.time(), 0, None
+    start, sent, first = time.time(), 0, None
     for key in keys:
         env = Envelope.model_validate(json.loads(archive.get(key)))
-        if prev is not None and args.speed > 0:
-            time.sleep(max(0.0, (env.last_updated - prev) / args.speed))
-        prev = env.last_updated
+        if first is None:
+            first = env.last_updated
+        elif args.speed > 0:
+            time.sleep(max(0.0, start + (env.last_updated - first) / args.speed - time.time()))
         for msg in explode_station_status(env, time.time()).messages:
             publisher.publish(topic, msg.key, encode({**msg.value, "replay": True}))
             sent += 1
     publisher.flush()
-    elapsed = time.time() - start
-    print(f"replayed {len(keys)} snapshots, {sent} messages in {elapsed:.1f}s ({sent / elapsed:.0f} msg/s)")
+    elapsed = max(time.time() - start, 1e-9)
+    print(
+        f"replayed {len(keys)} snapshots ({args.skip}..{args.skip + len(keys) - 1} of {day}), {sent} messages to "
+        f"{topic} in {elapsed:.1f}s ({sent / elapsed:.0f} msg/s)"
+    )
 
 
 def main() -> None:
@@ -102,6 +114,8 @@ def main() -> None:
     p.add_argument("--date", required=True, help="YYYY-MM-DD (UTC)")
     p.add_argument("--speed", type=float, default=10.0, help="N x real time; 0 = as fast as possible")
     p.add_argument("--topic", default=None)
+    p.add_argument("--skip", type=int, default=0, help="start at the day's Nth snapshot (time order)")
+    p.add_argument("--limit", type=int, default=None, help="replay at most N snapshots")
     p.set_defaults(fn=cmd_replay)
     args = parser.parse_args()
     args.fn(args)

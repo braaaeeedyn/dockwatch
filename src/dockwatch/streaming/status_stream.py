@@ -18,7 +18,7 @@ from pyspark.sql.streaming.state import GroupState, GroupStateTimeout
 from dockwatch.config import get_settings
 from dockwatch.streaming.episodes import EpisodeState, Thresholds, advance
 from dockwatch.streaming.lake import build_session, ddl, migrate
-from dockwatch.streaming.run_mode import trigger_options
+from dockwatch.streaming.run_mode import lab_refusal, table, trigger_options
 from dockwatch.streaming.transforms import availability_windows, parse_kafka, to_silver
 
 log = logging.getLogger("dockwatch.status_stream")
@@ -98,8 +98,6 @@ def make_episode_fn(t: Thresholds):
 
 
 def write_episode_outputs(s):
-    c = s.iceberg_catalog
-
     def sink(batch: DataFrame, batch_id: int) -> None:
         batch.persist()
         spark: SparkSession = batch.sparkSession
@@ -140,7 +138,7 @@ def write_episode_outputs(s):
         )
         eps.createOrReplaceTempView("episode_updates")
         spark.sql(
-            f"""MERGE INTO {c}.silver.station_episodes t USING episode_updates s
+            f"""MERGE INTO {table(s, "silver.station_episodes")} t USING episode_updates s
                 ON t.episode_id = s.episode_id
                 WHEN MATCHED AND s.updated_ts >= t.updated_ts THEN UPDATE SET *
                 WHEN NOT MATCHED THEN INSERT *"""
@@ -153,19 +151,22 @@ def write_episode_outputs(s):
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     s = get_settings()
+    reason = lab_refusal(s)  # before any JVM: a lab run never writes production tables, topics or checkpoints
+    if reason:
+        raise SystemExit(f"status_stream: refusing to start: {reason}")
     t = thresholds(s)
     c = s.iceberg_catalog
     spark = build_session(s, "dockwatch-status-stream")
     spark.sparkContext.setLogLevel("WARN")
-    for stmt in ddl(c):
+    for stmt in ddl(c, s.namespace_prefix):
         spark.sql(stmt)
-    log.info("schema migrations applied: %s", migrate(spark, c) or "none")
+    log.info("schema migrations applied: %s", migrate(spark, c, s.namespace_prefix) or "none")
 
     raw = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", s.spark_kafka_bootstrap)
         .option("subscribe", s.topic_station_status)
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", s.starting_offsets)
         .option("maxOffsetsPerTrigger", 100_000)
         .load()
     )
@@ -173,7 +174,7 @@ def main() -> None:
     trigger = trigger_options(s)
     ckpt = s.checkpoint_root.rstrip("/")
 
-    def iceberg_append(df: DataFrame, name: str, table: str):
+    def iceberg_append(df: DataFrame, name: str, target: str):
         return (
             df.writeStream.format("iceberg")
             .outputMode("append")
@@ -181,7 +182,7 @@ def main() -> None:
             .option("checkpointLocation", f"{ckpt}/{name}")
             .trigger(**trigger)
             .queryName(name)
-            .toTable(f"{c}.{table}")
+            .toTable(table(s, target))
         )
 
     iceberg_append(parsed, "bronze_status", "bronze.station_status")

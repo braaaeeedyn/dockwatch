@@ -2174,3 +2174,133 @@ Spark image is still `348335af7892` (`check_n.py image` ok), not rebuilt.
 **Checks:** Loop N's 223, unchanged and in order. No new check and no guard re-base: the committed base is still
 1e1260a, and `.loop/checks/n2/` lies outside every guard's pin glob. N2 changes no product code; its only edits are
 this entry and three in-place CURRENT_STATE edits. The N2 Checker's own numbers go into Loop O's entry.
+
+## 2026-10-19 · Loop O · local measurements in METRICS.md, each with its command; the lab mode of the streaming job
+
+**Goal:** measure locally every M6 number that needs no AWS account, each with the command that produced it, into
+`docs/METRICS.md`: p50 / p95 latency from an hour of the continuous `stream`, sustained throughput replaying an archived
+day at 10× and 50× into lab tables (never production), files and Trino query time before vs after compaction, and a
+crash-restart with a zero-diff count. The Athena bytes-scanned row says "needs AWS". The README gains a Results
+section, and `IMPLEMENTATION_PLAN.md`'s M6 METRICS.md item gains a note but stays unticked until the Athena row
+exists.
+
+**N2 Checker** (the carry-over from Loop N2, as M3's numbers went into Loop N's entry): the fresh full run of
+2026-10-19 16:47–17:45 local passed **223 / 223** (193 pass + 30 metrics exit 0; 597 pass / 14 skip / 0 fail per
+test), with 0 regressions; the 7 checks Loop N lost passed and `accept-n-spark-events` was evaluated in full.
+`hostmem.log` (host free / vmmemWSL / the VM's `Cached` / containers, MiB): start **6,482** / 2,088 / 524 / 1,958;
+before-batch **5,069** (floor 3,300); the trips-gate wait 2,750 / 6,025 / 2,109 / 4,091; the health-gate wait 3,110 /
+5,536 / 2,001 / 4,115; end 3,716; Chrome, Discord and Medal absent. Memgates `free_before → free_after`:
+airflow-tests 5,378 → 5,386, batch 5,005 → 5,009, trips **2,779** → 2,790, marts 3,709 → 3,700, health **3,171** →
+3,169, keepalive 4,167 → 4,170, m-lineage 3,682 → 3,699, n-lineage 3,717 → 3,712; every wait was reached on its first
+call, with no pause. Catch-ups with the listener **1,395** / **1,531** MiB (`verify-lake` 1,468 / 1,627);
+`metric-n-spark` 57 events / 275,000 B per micro-batch, **16.5 MB** per hour if `stream` emitted (it does not); Marquez
+api 286 / 243 MiB; the PNG 156,889 B; `airflow-cli` 766 MiB; Trino's first JVM **2,004** MiB (above the 1,950 flag
+line, flag only; baseline 1,997 / 2,008); health.json 82,029 B; nav-motion 0 misses; TIME_WAIT 115 → 0 in 105.5 s and
+235 → 0 in 110.5 s; 0 Tcpip events; 0 U1 re-runs; 91 task runs, 0 incomplete, 0 new crash dumps. **The abandoned
+first attempt** (not used for results) started at **3,947** MiB with Chrome open, below M0. It paused before
+`metric-memory-before-batch` (2,956 MiB) and before `metric-k-memgate-health` (1,350 MiB, Trino up), and the
+low-memory reaper killed the producer / exporter during that second pause, so M5 abandoned it: `batch-stop`, restart,
+a 30 min warm-up, then the fresh run above.
+
+**Plan-time findings (2026-10-19):**
+- **The archive has no complete day** (snapshots per UTC day: 07: 88, 08: 860, 09: 420, 10: 521, 12: 1,158 with one
+  86 min gap, 13: 356, 15: 637, 16: 782, 17: 729, 19: 327, 20: 62). **2026-10-16** is the longest gap-free day: 782
+  snapshots over 13.14 h, one every 60.5 s, no gap over 5 min. The old replay slept through gaps (the 86 min gap
+  would idle 8.6 min at 10×).
+- `gbfs.station_status.replay` existed (6 partitions, 7 days) and was empty; topics are auto-created, so the lab sink
+  topics appear on first write.
+- Spark's streaming snapshots carry `added-records`; a no-data batch (a stateful query moving its watermark) commits
+  an `append` without it. Two real catch-up batches took 17.3 and 19.1 s from `processed_ts` to commit, and
+  `kafka_ts - fetched_ts` had a p50 of 0.24 s, so the host / VM clock skew is small.
+
+**Decisions (plan D1–D10):**
+- **D1:** an hour of `stream` cannot be a check (every check is one foreground call under 10 min), so the Builder
+  measures once and the Checker recomputes every number from the lake with its own SQL and reruns a crash-restart
+  and a short lab replay.
+- **D2:** latency is defined once (the window, the micro-batch as one `processed_ts`, the pairing of batches with
+  their committed snapshots, **nearest-rank** percentiles over `GROUP BY` counts, events per minute over the Kafka
+  span, **sustained** = every batch paired and done within the 60 s trigger). D3: `catchup`, then `stream` for at
+  least 67 min.
+- **D4, the lab mode:** two Settings fields, `namespace_prefix` ("" = production, `lab_` = `lake.lab_bronze` /
+  `lake.lab_silver`) and `starting_offsets` (`earliest` / `latest`); `run_mode.table()` names every table;
+  `run_mode.lab_refusal()` refuses a bad prefix, a lab run with any production checkpoint root or topic, and
+  production with `latest` (it would skip the backlog). `stream-lab` is one `compose run -d --rm --no-deps --name
+  dockwatch-stream-lab` with exactly the lab settings and waits until every query has written its Kafka source's
+  starting offsets (`sources/0/0`). One Spark JVM at a time: `stream_running()` now reads the service label, so it
+  sees `compose run` containers too.
+- **D5:** replay 2026-10-16 at **50×** in full (two chunks) and at **10×** its first 240 snapshots (three chunks);
+  the whole day at 10× is cut (79 min of a second long JVM). `replay` paces by schedule and gains `--skip` /
+  `--limit`.
+- **D6:** `measure files` on a fresh Trino JVM before and after `dag-test iceberg_maintenance`, one discarded warm-up
+  run, the median of Trino's `elapsedTimeMillis`. **D7:** `crash-restart` (SIGKILL with a silver batch in flight,
+  catchup, `verify-lake`, a JSON record). **D8:** the METRICS.md format the check parses. **D9:** the README Results
+  section. **D10:** a Checker pause with Trino up now stops Trino first (`batch-stop`), because N2 lost the producer /
+  exporter during a pause with Trino at 1.79 GiB.
+
+**Built:**
+- `config.py`: `namespace_prefix`, `starting_offsets`. `streaming/run_mode.py`: `table()`, `lab_refusal()`, the
+  production-name constants (a host test pins them to the Settings defaults). `streaming/lake.py`: `ddl(c, prefix)`
+  and `migrate(spark, c, prefix)`; `ddl("lake")` is byte for byte the old DDL. `streaming/status_stream.py`: refuses
+  on `lab_refusal()` before the session, reads `startingOffsets` from the settings and names its appends and the
+  episodes MERGE through `table()`.
+- `producer/__main__.py`: `replay --skip N --limit N`, and pacing by schedule (snapshot k at start +
+  (`last_updated`ₖ − `last_updated`₀) / speed), so publishing time no longer lowers the achieved speed.
+- `src/dockwatch/measure.py` (stdlib + `dockwatch.config`): a small Trino HTTP client (POST `/v1/statement`, follow
+  `nextUri`, retry 502 / 503 / 504, raise on an error) and `measure window` / `measure files`. Each prints one JSON
+  line, saves it to `data/metrics/`, and exits 1 on a Trino error.
+- `tasks.py`: `stream` (now refuses while any status-stream container runs), `stream-lab`, `stream-lab-stop`,
+  `crash-restart`, `measure`; `spark_inspect` shares its command with crash-restart's `verify-lake`. `catchup` is
+  unchanged.
+- `tests/test_measure.py`: 11 host tests (percentiles, pairing with no-data snapshots and an unpaired batch, the window
+  numbers, sustained, the files measure, the Trino client, the lab names and refusals, `stream-lab`'s one container
+  and its refusals, `catchup` / `stream` / `crash-restart` refusing beside a lab run, the replay slice and schedule on
+  an `FsArchive` with a fake clock, the crash-restart parsers and the zero-diff rule). Host tests: 157 pass, 7
+  skipped.
+
+**The campaign** (Builder, 2026-10-20 02:09–04:17 UTC, Chrome / Discord / Medal closed; every step one foreground
+call with the 5 s docker-stats sampler as its child; `hostmem.py` before each JVM: 6,253 MiB at the start, every
+wait reached at once, lowest 3,385 MiB before the 10× lab run):
+- **The hour:** `catchup` (29 s); `python tasks.py stream` at 02:09:58Z (it recreated `dockwatch-status-stream-1`, the
+  pre-Loop-N container, as planned); 8 `watch.py` calls; `stream-stop` at 03:18:34Z.
+  `measure window lake.silver.station_status 2026-10-20T02:15:00Z 2026-10-20T03:18:00Z` (63 min): 60 micro-batches,
+  40,114 rows, 0 unpaired; fetch to silver p50 / p95 **59.3 / 60.9 s**; fetch to queryable **64.1 / 68.7 s**; batch
+  p95 9.6 s; 647 events/min; fetch to Kafka p50 0.3 s (no skew note needed). The producer's 60 s poll and the 60 s
+  trigger were in phase, so each snapshot waited almost a full trigger; the replays, with snapshots arriving all the
+  time, show the half-trigger median (~30 s). The check's own `window_rows()` gave identical numbers.
+- **Crash-restart** (`python tasks.py crash-restart`, 83 s): **SIGKILL** at 03:19:02Z, 0.35 s after the queries
+  started, with silver batch 301 in flight (offsets logged, nothing committed); catch-up and `verify-lake` exit 0;
+  3,915,131 bronze rows = distinct offsets, 0 silver duplicates, 0 gaps, each partition's newest offset = the end at
+  the kill − 1: **0 duplicates, 0 missing**. The JVM started in ~2 s, so the kill landed at the start of the batch;
+  the first reading of the checkpoints is the baseline, so an offsets file left by an earlier stop never counts as
+  in flight.
+- **Compaction** (`measure files`, then `python tasks.py dag-test iceberg_maintenance` run
+  `manual__2026-10-20T03:22:09+00:00` in 50 s, `batch-stop`, `batch-up`, `measure files`): silver **419 → 11** files
+  (17.7 → 14.3 MB), the station query **287 → 163 ms** median (warm-ups 1,393 / 664 ms); bronze **79 → 11**.
+  `pipeline_health` (`manual__2026-10-20T03:24:02+00:00`, 37 s): p95 tile 61.2 s, 636.2 events/min, lag 0,
+  health.json 82,674 B, status warn (freshness 320 s after the stop).
+- **10×** (`stream-lab` 03:25:18Z, `replay --date 2026-10-16 --speed 10` with `--skip 0 / 80 / 160 --limit 80`,
+  480 s each, `stream-lab-stop` 03:53:23Z; window 03:25:00Z – 03:54:00Z of `lake.lab_silver.station_status`):
+  155,040 rows, 26 batches, **6,294 events/min**, batch max 9.7 s, fetch to silver p95 58.7 s, **sustained**; 240
+  distinct snapshots, achieved speed 9.81×, lab bronze = lab silver. `lab_ready` answered in ~11 s: Spark does write
+  `sources/0/0` when it starts from `latest` (the plan's unverified assumption holds).
+- **50×** (`stream-lab` 03:55:09Z, `replay --date 2026-10-16 --speed 50` with `--skip 0 --limit 391` and `--skip 391
+  --limit 391`, 474 / 472 s, `stream-lab-stop` 04:14:52Z; window 03:55:00Z – 04:15:00Z): 505,172 rows, 17 batches of
+  ~30,000 rows, **30,757 events/min**, batch max 11.2 s, fetch to silver p95 56.9 s, **sustained**; 782 distinct
+  snapshots, achieved speed 48.0× (a 39 s hand-off between the chunks), lab bronze = lab silver.
+- **One redo:** the first 50× `stream-lab` started at 03:53:52Z, inside the minute the 10× window ends on, so it was
+  stopped before any replay and started again at 03:55:09Z (an empty `/checkpoints/lab/20261020T035352Z` remains).
+- **Production back:** `catchup` (27 s) and `verify-lake` passed (3,951,363 bronze rows, 0 duplicates, 0 gaps); the
+  five stream containers and airflow-db kept their ids (airflow-db started again after `batch-stop`, as found).
+- **Peaks** (docker stats; limits 2 GiB): the stream JVM 2,022 MiB (RSS ~1,855 MiB, the rest page cache; above the
+  1,900 flag line, flag only); the lab JVM 2,033 (10×) / 2,005 (50×) MiB; catch-ups 1,455 / 1,695 (after the kill) /
+  1,261 MiB, `verify-lake` 1,459; Trino 1,970 MiB in `iceberg_maintenance` (above the 1,950 flag line, flag only),
+  1,380 in `pipeline_health`, 997 for the lab windows; s3 up to 1,087 MiB, redpanda up to 620. No OOMKill. The
+  producer and exporter logs were at most 60 s old throughout.
+
+**Docs:** `docs/METRICS.md` (new), README (status, Docs row, the measurement tasks, Results), CURRENT_STATE
+(rewritten in place for the lab mode, the new tasks and the measured numbers), `IMPLEMENTATION_PLAN.md` (a Loop O
+note on the M6 METRICS.md item, still unticked).
+
+**Left as lab data on purpose** (the user's deletion list): `lake.lab_bronze.*` / `lake.lab_silver.*` (660,212 rows
+each in station_status), `gbfs.alerts.lab`, `dockwatch.station_state.lab`, the 660,212 replayed records in
+`gbfs.station_status.replay` (they expire after 7 days) and `/checkpoints/lab/`.

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     watermark: str = "10 minutes"
     # OpenLineage Spark listener (Loop N): empty = off; tasks.py catchup sets it to the mounted data/lineage
     spark_lineage_dir: str = ""
+    # Lab mode (Loop O, tasks.py stream-lab): "" = production tables; "lab_" = lake.lab_bronze / lake.lab_silver
+    namespace_prefix: str = ""
+    # Kafka startingOffsets of a new checkpoint: production reads the whole backlog; a lab run starts at the end
+    starting_offsets: Literal["earliest", "latest"] = "earliest"
 
     # Ops database and CDC (M3). ops_db_dsn is the host view of compose's ops-db (database `ops`, never
     # iceberg_catalog); Debezium writes one topic per table, ops.public.<table>, applied into lake.<cdc_namespace>.

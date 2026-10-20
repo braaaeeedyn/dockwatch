@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; Loop N: the OpenLineage Spark listener in `catchup`, joined with the Airflow lineage, and the full graph on the Pipeline page and in `docs/img/lineage.png`; next: local measurements and a local Lighthouse run, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; Loop N: the OpenLineage Spark listener in `catchup`, joined with the Airflow lineage, and the full graph on the Pipeline page and in `docs/img/lineage.png`; Loop O: local measurements in [`docs/METRICS.md`](docs/METRICS.md), each with its command (an hour of `stream`, 10× and 50× replays into lab tables, compaction before / after, a SIGKILL crash-restart); next: a local Lighthouse run, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -18,6 +18,7 @@ DockWatch is an independent portfolio project. It is **not affiliated with Lyft 
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Design system for the site (v1.0, frozen during frontend work). |
 | [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) | What the app is right now and what is being worked on. |
 | [`docs/DEVLOG.md`](docs/DEVLOG.md) | Append-only history of everything done, tried and removed. |
+| [`docs/METRICS.md`](docs/METRICS.md) | Local measurements (latency, throughput, compaction, crash-restart), each with its command. |
 
 ## Run it (so far)
 Needs Python 3.12, [uv](https://docs.astral.sh/uv/) and Docker.
@@ -44,6 +45,19 @@ python tasks.py verify-lake          # consistency checks; exits 1 on duplicates
 python tasks.py stream               # or: keep the job running, one micro-batch per minute ...
 python tasks.py stream-stop          # ... and stop it (always before catchup / inspect / sql / verify-lake)
 python tasks.py inspect              # the same report as verify-lake, without failing
+```
+
+Measurements (Loop O, [`docs/METRICS.md`](docs/METRICS.md)). The lab mode runs the same job on its own tables
+(`lake.lab_bronze` / `lake.lab_silver`), topics (`.lab`) and checkpoints (`/checkpoints/lab/<UTC>`), never
+production; one Spark JVM at a time, as above:
+
+```bash
+python tasks.py stream-lab           # the streaming job in lab mode, reading gbfs.station_status.replay from its end
+python tasks.py replay --date 2026-10-16 --speed 50 --skip 0 --limit 391   # re-publish a slice of an archived day on schedule
+python tasks.py stream-lab-stop      # stop the lab container
+python tasks.py crash-restart        # SIGKILL the stream mid-batch, catchup, verify-lake -> data/metrics/crash-restart-<UTC>.json
+python tasks.py measure window lake.silver.station_status <from> <to>   # latency / batches / rate (Trino up) -> data/metrics/
+python tasks.py measure files lake.silver.station_status                # files and the median time of one query (Trino up)
 ```
 
 The operations database (M3, Postgres `ops` on `ops-db`) is filled by a seeded simulator on the host (no JVM):
@@ -127,6 +141,14 @@ npx playwright test                  # every page: layout, accessibility, behavi
 **CI** (`.github/workflows/ci.yml`, on pushes to `main` and on pull requests) runs ruff, `ruff format --check`,
 pytest and an offline `dbt compile` (`python tasks.py dbt-compile`), the Spark transform tests in the Spark image, `terraform fmt -check` + `validate`, the full Playwright suite
 on Node 24 and a repeat job for the alerts and shell specs. Playwright runs with `--retries=0`, so a flaky test shows up red.
+
+## Results
+- Streamed live Bay Wheels station status (647 events/min) from Kafka through Spark Structured Streaming into Apache
+  Iceberg with a **68.7 s** p95 fetch-to-queryable latency at a 60 s trigger, and sustained **30,757** events/min
+  (a 50× replay of an archived day, every micro-batch done in under 12 s); **0 duplicates** and 0 missing offsets
+  after a SIGKILL mid-batch; compaction took silver from 419 to 11 files and a station query from 287 to 163 ms.
+  Measured locally, each number with its command, in [`docs/METRICS.md`](docs/METRICS.md). The Athena bytes-scanned
+  number waits for the AWS account.
 
 ## Data and licence
 - **Bay Wheels GBFS feeds** and **trip history**: Bay Wheels data is provided by Lyft Bikes and Scooters, LLC

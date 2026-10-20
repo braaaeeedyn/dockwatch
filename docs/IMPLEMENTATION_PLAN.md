@@ -318,6 +318,7 @@ shows the full graph.
 - [ ] Measurements into `docs/METRICS.md` (each with the command that produced it):
       p50/p95 end-to-end latency; sustained throughput at 10× and 50× replay; file count and query time before vs.
       after compaction; Athena bytes scanned for a full backfill vs. one incremental month; restart with a zero-diff count.
+      *(Loop O: every local number is in docs/METRICS.md with its command; the Athena row waits for the AWS account.)*
 
 **Done when:** every number in the README résumé bullet is filled from `METRICS.md`.
 

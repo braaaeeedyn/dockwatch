@@ -3,9 +3,14 @@
 Usage: python tasks.py <task> [args]
 """
 
+import ast
+import json
 import os
+import re
 import subprocess
 import sys
+import time
+from datetime import UTC, datetime
 
 # The stdlib-only batch guard (Trino never beside Spark / Connect); nothing else from src is imported here.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
@@ -17,6 +22,16 @@ CONNECT_IMAGE = "quay.io/debezium/connect:2.7.3.Final"
 # Trino (M4a, compose service `trino`, profile batch). The same literal is in docker-compose.yml.
 TRINO_IMAGE = "trinodb/trino:483"
 COMPOSE_PROJECT = "dockwatch"
+# Loop O lab mode: the streaming job on lake.lab_* tables, .lab topics and its own checkpoints (never production)
+LAB_CONTAINER = "dockwatch-stream-lab"
+LAB_ENV = {
+    "DOCKWATCH_NAMESPACE_PREFIX": "lab_",
+    "DOCKWATCH_STARTING_OFFSETS": "latest",
+    "DOCKWATCH_TOPIC_STATION_STATUS": "gbfs.station_status.replay",
+    "DOCKWATCH_TOPIC_ALERTS": "gbfs.alerts.lab",
+    "DOCKWATCH_TOPIC_STATION_STATE": "dockwatch.station_state.lab",
+}
+STREAM_QUERIES = ("bronze_status", "silver_status", "availability_5m", "episodes")  # one checkpoint dir each
 CASING_RECOVERY = (
     "Run tasks from Git Bash in the exact path the containers were created from (cd /c/Users/brady/coding/dockwatch), "
     "never from cmd.exe, PowerShell or Python shell=True. If ops-db was already recreated, recover (keeps the "
@@ -95,12 +110,8 @@ def refuse_beside_batch(task: str) -> None:
 
 
 def stream_running() -> bool:
-    out = subprocess.run(
-        ["docker", "compose", "--profile", "spark", "ps", "-q", "--status", "running", "status-stream"],
-        capture_output=True,
-        text=True,
-    )
-    return bool(out.stdout.strip())
+    """Any running status-stream container: `stream`, a catch-up or a lab run (compose run containers too)."""
+    return "status-stream" in batch_guard.running_services()
 
 
 def connect_running() -> bool:
@@ -141,10 +152,9 @@ def catchup() -> None:
     )
 
 
-def spark_inspect(*args: str) -> None:
-    """inspect_tables.py in a single small JVM; `--check` (verify-lake) exits 1 if the lake is not consistent."""
-    refuse_beside_batch("verify-lake" if "--check" in args else "inspect")
-    sh(
+def inspect_cmd(*args: str) -> list[str]:
+    """The inspect_tables.py command, shared by spark_inspect and crash-restart's verify-lake."""
+    return [
         "docker",
         "compose",
         "--profile",
@@ -164,7 +174,236 @@ def spark_inspect(*args: str) -> None:
         "spark.sql.codegen.wholeStage=false",
         "/opt/dockwatch/src/dockwatch/streaming/inspect_tables.py",
         *args,
+    ]
+
+
+def spark_inspect(*args: str) -> None:
+    """inspect_tables.py in a single small JVM; `--check` (verify-lake) exits 1 if the lake is not consistent."""
+    refuse_beside_batch("verify-lake" if "--check" in args else "inspect")
+    sh(*inspect_cmd(*args))
+
+
+def stream(*args: str) -> None:
+    """The long-running job (until stream-stop). One Spark JVM at a time: refused while any status-stream container
+    runs (a catch-up or a lab run), and beside Trino / Marquez."""
+    refuse_beside_batch("stream")
+    if stream_running():
+        print("a status-stream container is running (stream, catchup or stream-lab); one Spark JVM at a time.")
+        sys.exit(1)
+    sh("docker", "compose", "--profile", "spark", "up", "-d", "status-stream", *args)
+
+
+def spark_busy(task: str) -> None:
+    """Exit 1 while a Spark JVM (any status-stream container, cdc-apply) or Kafka Connect runs."""
+    busy = sorted({"status-stream", "cdc-apply", "connect"} & batch_guard.running_services())
+    if busy:
+        print(f"{task}: {' and '.join(busy)} running; one Spark JVM at a time, and never beside Kafka Connect.")
+        sys.exit(1)
+
+
+def lab_ready(name: str, checkpoint: str, timeout: float = 240) -> bool:
+    """True once each query has written its Kafka source's initial offsets (<checkpoint>/<query>/sources/0/0): only
+    then is `latest` resolved, so a replay started afterwards is read in full."""
+    paths = [f"{checkpoint}/{q}/sources/0/0" for q in STREAM_QUERIES]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        out = subprocess.run(["docker", "exec", name, "ls", *paths], capture_output=True, text=True)
+        if out.returncode == 0:
+            return True
+        if "No such container" in out.stderr or "is not running" in out.stderr:
+            return False
+        time.sleep(5)
+    return False
+
+
+def stream_lab() -> None:
+    """Loop O lab mode: the streaming job in one `compose run` container on lake.lab_bronze / lake.lab_silver, the
+    .lab topics and /checkpoints/lab/<UTC>, reading gbfs.station_status.replay from its end. Feed it with
+    `python tasks.py replay --date ...`; stop it with stream-lab-stop."""
+    refuse_beside_batch("stream")
+    spark_busy("stream-lab")
+    ckpt = f"/checkpoints/lab/{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    env = {**LAB_ENV, "DOCKWATCH_CHECKPOINT_ROOT": ckpt}
+    sh(
+        "docker",
+        "compose",
+        "--profile",
+        "spark",
+        "run",
+        "-d",
+        "--rm",
+        "--no-deps",
+        "--name",
+        LAB_CONTAINER,
+        *(x for k, v in env.items() for x in ("-e", f"{k}={v}")),
+        "status-stream",
     )
+    if not lab_ready(LAB_CONTAINER, ckpt):
+        print(f"stream-lab: the queries did not resolve their Kafka offsets in time; stopping {LAB_CONTAINER}")
+        subprocess.run(["docker", "stop", LAB_CONTAINER], capture_output=True)
+        sys.exit(1)
+    print(f"stream-lab: ready ({ckpt}); now python tasks.py replay --date <day> --speed <N>", flush=True)
+
+
+def stream_lab_stop() -> None:
+    """Stop the lab container (--rm removes it); nothing to do when there is none."""
+    if subprocess.run(["docker", "inspect", LAB_CONTAINER], capture_output=True).returncode:
+        print(f"{LAB_CONTAINER}: no container, nothing to stop")
+        return
+    sh("docker", "stop", LAB_CONTAINER)
+
+
+# crash-restart polls the production container with one ls: "<query>:<newest offsets id>:<newest commits id>"
+CKPT_LS = (
+    f"for q in {' '.join(STREAM_QUERIES)}; do "
+    'echo "$q:$(ls /checkpoints/$q/offsets 2>/dev/null | grep -xE "[0-9]+" | sort -n | tail -1)'
+    ':$(ls /checkpoints/$q/commits 2>/dev/null | grep -xE "[0-9]+" | sort -n | tail -1)"; done'
+)
+
+
+def newest_batches(ls_out: str) -> dict[str, tuple[int, int]]:
+    """CKPT_LS output -> query: (newest offsets id, newest commits id), -1 for an empty directory."""
+    out = {}
+    for line in ls_out.splitlines():
+        query, _, rest = line.strip().partition(":")
+        if query in STREAM_QUERIES:
+            off, _, com = rest.partition(":")
+            out[query] = (int(off) if off.isdigit() else -1, int(com) if com.isdigit() else -1)
+    return out
+
+
+def in_flight(now: dict[str, tuple[int, int]], base: dict[str, tuple[int, int]]) -> dict[str, int | None]:
+    """Per query, the batch id this JVM planned (newer than the first reading) and has not committed, else None. A
+    stale offsets file left by an earlier stop never counts."""
+    out = {}
+    for q in STREAM_QUERIES:
+        off, com = now.get(q, (-1, -1))
+        out[q] = off if off > com and off > base.get(q, (-1, -1))[0] else None
+    return out
+
+
+def end_offsets(rpk_out: str) -> dict[int, int]:
+    """`rpk topic describe <topic> -p` -> partition: high watermark (the next offset to be written)."""
+    out = {}
+    for line in rpk_out.splitlines()[1:]:
+        parts = line.split()
+        if parts and parts[0].isdigit() and parts[-1].isdigit():
+            out[int(parts[0])] = int(parts[-1])
+    return out
+
+
+def parse_verify(text: str) -> dict:
+    """verify-lake's output -> bronze rows / distinct offsets, silver duplicates, gaps and newest offset per
+    partition (the `hi` column of its bronze-gaps table)."""
+
+    def num(pattern: str) -> int | None:
+        found = re.search(pattern, text)
+        return int(found.group(1)) if found else None
+
+    gaps = re.search(r"check: bronze offset gaps per partition = (\{[^}]*\})", text)
+    section = text[text.find("== bronze gaps") :].split("\n== ", 1)[0] if "== bronze gaps" in text else ""
+    row = r"^\|\s*(\d+)\|\s*-?\d+\|\s*(\d+)\|\s*\d+\|\s*\d+\|\s*$"  # | p | lo | hi | n | gaps |
+    return {
+        "bronze_rows": num(r"check: bronze rows = (\d+)"),
+        "bronze_distinct_offsets": num(r"check: bronze rows = \d+, distinct \(partition, offset\) = (\d+)"),
+        "silver_duplicates": num(r"check: silver duplicates on \(station_id, snapshot_ts\) = (\d+)"),
+        "offset_gaps": {int(p): int(n) for p, n in ast.literal_eval(gaps.group(1)).items()} if gaps else {},
+        "bronze_hi": {int(p): int(hi) for p, hi in re.findall(row, section, re.M)},
+    }
+
+
+def judge(rec: dict) -> dict:
+    """duplicates = bronze rows - distinct offsets + silver duplicates; missing = gaps + offsets published before
+    the kill that bronze lacks; zero_diff = both 0, and catchup and verify-lake exited 0."""
+    counts = (rec["bronze_rows"], rec["bronze_distinct_offsets"], rec["silver_duplicates"])
+    if None in counts or not rec["bronze_hi"] or not rec["kafka_end_at_kill"]:
+        return {**rec, "duplicates": None, "missing": None, "zero_diff": False}
+    dup = rec["bronze_rows"] - rec["bronze_distinct_offsets"] + rec["silver_duplicates"]
+    hi = rec["bronze_hi"]
+    late = sum(max(0, end - 1 - hi.get(p, -1)) for p, end in rec["kafka_end_at_kill"].items())
+    missing = sum(rec["offset_gaps"].values()) + late
+    ok = dup == 0 and missing == 0 and rec["catchup_rc"] == 0 and rec["verify_rc"] == 0
+    return {**rec, "duplicates": dup, "missing": missing, "zero_diff": ok}
+
+
+def service_container(service: str) -> str:
+    """The id of the running production (not `compose run`) container of a compose service, or ""."""
+    out = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--filter",
+            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+            "--filter",
+            "label=com.docker.compose.oneoff=False",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return (out.stdout.split() or [""])[0]
+
+
+def crash_restart() -> None:
+    """SIGKILL the production stream with a silver micro-batch in flight, run catchup and verify-lake, and record
+    whether the lake has zero duplicates and zero missing Kafka offsets (data/metrics/crash-restart-<UTC>.json)."""
+    refuse_beside_batch("stream")
+    spark_busy("crash-restart")
+    started = datetime.now(UTC)
+    stream()
+    cid, base, flight, deadline = "", None, {}, time.monotonic() + 180
+    while time.monotonic() < deadline:
+        cid = cid or service_container("status-stream")
+        out = (
+            subprocess.run(["docker", "exec", cid, "sh", "-c", CKPT_LS], capture_output=True, text=True)
+            if cid
+            else None
+        )
+        if out is not None and out.returncode == 0:
+            now = newest_batches(out.stdout)
+            base = base or now  # the first reading, before this JVM has planned a batch
+            flight = in_flight(now, base)
+            if flight["silver_status"] is not None:
+                break
+        time.sleep(0.5)
+    else:
+        print("crash-restart: no silver_status batch in flight within 180 s; stopping the stream")
+        sh("docker", "compose", "--profile", "spark", "stop", "status-stream")
+        sys.exit(1)
+    killed = datetime.now(UTC)
+    subprocess.run(["docker", "kill", cid], capture_output=True)  # SIGKILL: exit 137, no shutdown hook runs
+    print(f"crash-restart: killed {cid[:12]} at {killed:%H:%M:%S}Z, in flight {flight}", flush=True)
+    rpk = subprocess.run(
+        ["docker", "exec", service_container("redpanda"), "rpk", "topic", "describe", "gbfs.station_status", "-p"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        catchup()
+        catchup_rc = 0
+    except SystemExit as e:
+        catchup_rc = e.code if isinstance(e.code, int) else 1
+    verify = subprocess.run(inspect_cmd("--check"), capture_output=True, text=True)
+    print(verify.stdout[-4000:], flush=True)
+    rec = judge(
+        {
+            "started_at": f"{started:%Y-%m-%dT%H:%M:%SZ}",
+            "killed_at": f"{killed:%Y-%m-%dT%H:%M:%SZ}",
+            "in_flight": flight,
+            "kafka_end_at_kill": end_offsets(rpk.stdout),
+            "catchup_rc": catchup_rc,
+            "verify_rc": verify.returncode,
+            **parse_verify(verify.stdout),
+        }
+    )
+    os.makedirs("data/metrics", exist_ok=True)
+    with open(f"data/metrics/crash-restart-{killed:%Y%m%dT%H%M%SZ}.json", "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=2)
+    print(json.dumps(rec))
+    if not rec["zero_diff"]:
+        sys.exit(1)
 
 
 def dbt_compile(*args: str) -> None:
@@ -208,10 +447,7 @@ TASKS = {
     "produce": lambda *a: uv("python", "-m", "dockwatch.producer", "run", *a),
     "produce-once": lambda *a: uv("python", "-m", "dockwatch.producer", "once", *a),
     "replay": lambda *a: uv("python", "-m", "dockwatch.producer", "replay", *a),
-    "stream": lambda *a: (
-        refuse_beside_batch("stream"),
-        sh("docker", "compose", "--profile", "spark", "up", "-d", "status-stream", *a),
-    ),
+    "stream": stream,
     "stream-logs": lambda *a: sh("docker", "compose", "logs", "--tail", "60", "status-stream", *a),
     "stream-stop": lambda *a: sh("docker", "compose", "--profile", "spark", "stop", "status-stream"),
     "test-spark": lambda *a: sh(
@@ -266,6 +502,11 @@ TASKS = {
     "inspect": lambda *a: spark_inspect(),
     "verify-lake": lambda *a: spark_inspect("--check", *a),
     "catchup": lambda *a: catchup(),
+    # Loop O measurements (docs/METRICS.md): the lab mode, a SIGKILL crash test, latency / files read from Trino
+    "stream-lab": lambda *a: stream_lab(),
+    "stream-lab-stop": lambda *a: stream_lab_stop(),
+    "crash-restart": lambda *a: crash_restart(),
+    "measure": lambda *a: uv("python", "-m", "dockwatch.measure", *a),
     "export": lambda *a: uv("python", "-m", "dockwatch.exporter", *a),
     # "Replay a day" file from the raw GBFS archive (host only, no Spark). Not `replay`: that re-publishes to Kafka.
     "replay-export": lambda *a: uv("python", "-m", "dockwatch.exporter.replay", *a),
