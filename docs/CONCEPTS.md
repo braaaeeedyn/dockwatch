@@ -491,3 +491,35 @@ that must not run beside Trino, Spark or Connect, and the batch work runs exactl
 the heavy services stopped, `lineage-up` starts an empty Marquez and `lineage-replay` sends it the events of the
 newest run of each DAG, in the order they happened. Recording first and loading later means Marquez never has to be
 up, never needs a volume, and can be rebuilt from the files in seconds.
+
+## Lineage across producers: the Spark listener, symlinks and dataset identity (Loop N)
+
+**A listener instead of declarations.** Airflow's Python tasks are opaque, so DockWatch declares their datasets. Spark
+is not: it plans every query, and the openlineage-spark **listener** (`spark.extraListeners`) reads those plans as the
+job runs and emits an event per query execution with the tables it really read and wrote. Nothing in
+`status_stream.py` changed; the listener is configuration, switched on only in `catchup` (the same queries as
+`stream`, without an event stream every minute in the tightest JVM).
+
+**Two producers, two names for one table.** Spark sees `lake.silver.station_status` as an Iceberg table at a storage
+location and names the **dataset** that way (namespace `s3://dockwatch`, name `warehouse/silver/station_status`).
+The Airflow events name the same table as Trino does (`trino://trino:8080`, `lake.silver.station_status`). Marquez
+joins jobs only where a dataset's namespace and name match exactly, so with both names the graph would split in two
+at silver, Kafka and Spark on one side, dbt and the marts on the other.
+
+**Symlinks.** OpenLineage's answer is the `symlinks` facet: a dataset can list other identifiers it is also known by.
+Spark's Iceberg integration adds one per table: type `TABLE`, namespace `http://iceberg-rest:8181` (the catalog),
+name `silver.station_status`. DockWatch's replay uses it to pick one identity: a table with a REST-catalog symlink is
+renamed to Loop M's Trino name before Marquez sees it. The rule lives in one place (`batch/lineage.py`), applies to
+recorded events, and leaves Kafka topics and files as their producers named them.
+
+**Job namespace vs dataset namespace.** The two namespaces mean different things. A dataset's namespace says where the
+data lives, and it is what makes two producers' datasets the same node. A job's **namespace** only groups jobs: the
+Spark jobs live in `dockwatch-spark`, the Airflow jobs in `dockwatch`, and the graph still runs straight through,
+because they share datasets, not jobs.
+
+**Why the replay renames some jobs.** A streaming query's write job is called `write_to_data_source_v2` whatever table
+it writes, and Marquez keeps only a job's latest inputs and outputs, so three streaming writes under one name would
+show as one edge. The replay appends the output table to each such job
+(`…write_to_data_source_v2.lake_silver_station_status`), which is the same form OpenLineage already uses for batch
+writes. It also keeps only runs that read and write something: DDL, a stateful step that writes nothing and the
+Kafka sinks inside `foreachBatch` (whose input Spark cannot see) add no edge to the graph.

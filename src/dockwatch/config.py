@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # processing_time = run until stopped (tasks.py stream); available_now = catch up on Kafka and exit (catchup)
     trigger_mode: Literal["processing_time", "available_now"] = "processing_time"
     watermark: str = "10 minutes"
+    # OpenLineage Spark listener (Loop N): empty = off; tasks.py catchup sets it to the mounted data/lineage
+    spark_lineage_dir: str = ""
 
     # Ops database and CDC (M3). ops_db_dsn is the host view of compose's ops-db (database `ops`, never
     # iceberg_catalog); Debezium writes one topic per table, ops.public.<table>, applied into lake.<cdc_namespace>.

@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; next: the OpenLineage Spark listener, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; Loop N: the OpenLineage Spark listener in `catchup`, joined with the Airflow lineage, and the full graph on the Pipeline page and in `docs/img/lineage.png`; next: local measurements and a local Lighthouse run, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -93,15 +93,19 @@ python tasks.py test-airflow         # DAG tests in the Airflow image (SQLite me
 python tasks.py scheduler-up         # the Airflow scheduler, for a smoke test (scheduler-stop stops it)
 ```
 
-Lineage (M5, Loop M): every Airflow run writes OpenLineage events (one JSON file each) to `data/lineage/`; Marquez
-starts on demand, empty, and never beside Trino, Spark or Connect (and they refuse while it runs):
+Lineage (M5, Loops M and N): every Airflow run writes OpenLineage events (one JSON file each) to `data/lineage/`, and
+every `catchup` writes the Spark listener's events (one `spark-*.jsonl` per run; `stream` writes none). Marquez starts
+on demand, empty, and never beside Trino, Spark or Connect (and they refuse while it runs). The replay names Spark's
+Iceberg tables the way Airflow does, so the graph runs from `gbfs.station_status` through Spark and dbt to every mart:
 
 ```bash
 python tasks.py lineage-up           # Marquez api + web + db (profile obs); web http://localhost:13000, API :15000
-python tasks.py lineage-replay       # the newest run of each DAG from data/lineage into Marquez
-python tasks.py lineage-shot         # screenshot of the batch graph -> web/img/lineage-batch.png (Pipeline page)
+python tasks.py lineage-replay       # the newest run of each DAG and the newest catch-up from data/lineage into Marquez
+python tasks.py lineage-shot         # the full graph -> web/img/lineage-batch.png (Pipeline page) + docs/img/lineage.png
 python tasks.py lineage-stop         # remove the Marquez containers (always before batch-up / catchup / connect-up)
 ```
+
+![Marquez lineage graph from gbfs.station_status through the Spark jobs and dbt to the marts](docs/img/lineage.png)
 
 `dag-test` refuses while another Airflow CLI run (another `dag-test` or a `dags backfill`) is still going. Keep
 `trip_history_monthly` paused: unpaused with `catchup=True`, the scheduler would load every month since 2019.

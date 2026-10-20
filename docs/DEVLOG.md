@@ -1946,3 +1946,231 @@ filter during runs) stay with the user.
 
 **Checks:** M2's 205, unchanged and in order. No new check and no guard re-base: the committed baseline is still
 2029cfa, and `.loop/checks/m3/` lies outside every guard's pin glob.
+
+## 2026-10-17 · Loop N · the OpenLineage Spark listener in catch-up runs, one naming with Airflow, the full lineage graph
+
+**Goal:** the Spark half of M5 OpenLineage. The streaming job's catch-up runs emit OpenLineage through the
+openlineage-spark listener into `data/lineage` (file transport, Marquez down); the replay names Spark's Iceberg tables
+the way the Airflow events do, so one Marquez graph runs from the Kafka topic `gbfs.station_status` through Spark and
+dbt to every mart; that graph is `docs/img/lineage.png` and the Pipeline page's lineage image. Plus Loop M3's review
+carry-overs. M5 OpenLineage and F4b are ticked.
+
+**Re-base of the carried guards:** Loop M (finished in M2 / M3) is committed as 1e1260a, so `check_m.py`'s scope,
+its guard's test / DAG / compose / `src/dockwatch/batch` / `tasks.py` rules and its docs rules ("Done most recently:
+**Loop M", "Before that: **Loop L", the Spark row, the IMPLEMENTATION_PLAN rules) now read 2029cfa..1e1260a;
+`check_m2.py`'s guard accepts a superset of checks and its CSS rules read 2029cfa..1e1260a. `check_n.py` takes over
+the working tree with the same or stricter rules. 223 checks (205 + 18); ids, commands and kinds of every carried
+check unchanged.
+
+**Plan-time facts (spikes, 2026-10-17):**
+- **The jar:** `io.openlineage:openlineage-spark_2.12:1.54.0` (newest, 2026-10-12), 43,626,304 B, shaded (only
+  micrometer / jspecify unshaded), sha1 `4aacb91670f5043fd214eb52fe44080c8eea7221` (Maven Central's). Spark 3.5.5,
+  Scala 2.12, Java 17 are supported.
+- **Class loader:** passed with `--jars`, the listener warned that its extension provider cannot reach the Iceberg /
+  Kafka connectors' classes ("place both in the Spark jars directory"), and a `defineClass` reflection failed on Java
+  17. With the jar in `/opt/spark/jars` the probe ran cleanly, so it is an image layer.
+- **Naming:** Spark names an Iceberg table by its storage location (`s3://dockwatch` +
+  `warehouse/silver/station_status`) and adds a `symlinks` facet: type TABLE, namespace `http://iceberg-rest:8181`,
+  name `silver.station_status`. Kafka is `kafka://redpanda:9092` + the topic. Jobs are
+  `dockwatch_status_stream.<operation>[.<table>]`; the application run `dockwatch_status_stream` is every other run's
+  parent.
+- **Three streaming writes share one job name:** `dockwatch_status_stream.write_to_data_source_v2` has no table suffix
+  (OpenLineage's `appendDatasetName` skips micro-batch writes), and Marquez keeps only a job's latest inputs /
+  outputs, so two of the three Kafka → bronze / silver edges would vanish.
+- **foreachBatch hides inputs:** the episodes MERGE (`replace_data.lake_silver_station_episodes`) reads only its own
+  target, the Kafka sinks inside `foreachBatch` show no input, `flat_map_groups_in_pandas_with_state` reads Kafka and
+  writes nothing, and the DDL runs write without reading (some without a START: "Query execution is null").
+- **Volume and memory (probe):** 196 events / 949 KB for 5 micro-batches, ~39 events / ~190 KB per micro-batch, so
+  `stream` (one micro-batch a minute) would write ~12 MB an hour; probe JVM 1,476 MiB with the listener vs 1,550 MiB
+  without (noise).
+
+**Decisions:**
+- **D1 listener only in `catchup`:** `tasks.py catchup()` sets `DOCKWATCH_SPARK_LINEAGE_DIR` and mounts
+  `data/lineage` with `docker compose run -v`; `stream`, `cdc-apply`, `verify-lake`, `inspect` and `sql` run without
+  it and compose is unchanged. `catchup` is the same code and datasets as `stream`, so it draws the same graph,
+  without ~12 MB an hour in the JVM with the least headroom (1.5–1.9 of 2 GB) or in Loop O's hour-long latency run.
+- **D2 no CDC lineage:** `cdc/apply.py` MERGEs from a collected local DataFrame, so it would add `lake.ops.*` outputs
+  with no input, disconnected from every mart.
+- **D3 one naming, Loop M's Trino names, applied at replay** (`batch/lineage.py`): a dataset with a TABLE symlink in
+  `http://iceberg-rest:8181` becomes (`trino://trino:8080`, `lake.<symlink name>`) and its symlink facet is dropped;
+  Kafka topics keep OpenLineage's names. The real writes all carry the symlink, so the plan's location fallback was
+  not needed and not built. Loop M's table and `check_m`'s plan are unchanged.
+- **D4 own job namespace `dockwatch-spark`** (`spark.openlineage.namespace`); Marquez joins datasets across job
+  namespaces, and `dockwatch` keeps exactly the Airflow jobs.
+- **D5 the replay rule:** each `spark-dockwatch-status-stream-<UTC>.jsonl` is one application run; per application
+  the replay posts the newest file that has a run reading and writing a dataset (an empty catch-up does not blank the
+  graph): the application run's events plus every run with an input and an output, each with one output renamed
+  `<job>.<output, dots → underscores>` unless it already ends so (e.g.
+  `dockwatch_status_stream.write_to_data_source_v2.lake_silver_station_status`), in event-time order after the Airflow
+  runs. DDL, the stateful step and the Kafka sinks add no edge and are not posted.
+- **D7 the full screenshot:** `lineage-shot` takes `/lineage/job/dockwatch/marts_daily.dbt_build?depth=3` (Kafka,
+  the Spark jobs, the trips and station_information branches, the marts, the gate, both exports), waits for the
+  Kafka node (`text=/gbfs\.station/`, run through Python's subprocess, not Git Bash), and with no argument writes
+  `web/img/lineage-batch.png` and copies it to `docs/img/lineage.png`. The page file keeps its name
+  (`lineage-batch.png`): the frozen `pipeline-lineage.spec.js` pins it; renaming it is the user's.
+- **D8 the card:** the alt text, caption and takeaway describe the full graph; the batch table is unchanged (the
+  frozen spec counts its rows); the Spark half is a lead-in and `<ul class="lineage__stream">` after the table, one
+  item per replayed Spark job with what it reads and writes. The house rule `.data-table tbody th { max-width: 16rem }`
+  broke job names mid-word, so `charts.css` sets `.lineage__table tbody th { max-width: none }` and
+  `white-space: nowrap` on its `code`; the list's long names break after a dot (`<wbr>`) and otherwise anywhere,
+  never widening the page.
+- **D9 leftovers block like the API:** `guard.refusal` refuses the Trino / Spark / Connect / keepalive tasks while
+  any of `marquez-api`, `marquez-db` or `marquez-web` runs (a leftover db / web pair holds ~90 MiB; the memgates clear
+  by 17–32 MiB). Same message; `lineage-up` removes leftovers itself and is not refused by them.
+
+**What was built:**
+- **Image:** one layer in `infra/spark/Dockerfile` after the pip layer: `ARG OPENLINEAGE=1.54.0`, then `wget` of the
+  jar from Maven Central into `/opt/spark/jars` and `sha1sum -c`. `docker build -t dockwatch-spark:3.5.5 infra/spark`
+  took 4.6 s (only that layer ran); the tag is unchanged, so every image pin holds. `test-spark` 8 passed.
+- **Listener wiring:** `Settings.spark_lineage_dir` (empty = off); `streaming/run_mode.lineage_conf(s, app, now)`
+  (pyspark-free) returns `{}` without a dir, else `spark.extraListeners` =
+  `io.openlineage.spark.agent.OpenLineageSparkListener`, the file transport at
+  `<dir>/spark-<app>-<UTC %Y%m%dT%H%M%SZ>.jsonl` and namespace `dockwatch-spark`; `lake.build_session` merges it.
+  The Spark image runs Python 3.10, so `build_session` takes `timezone.utc`, not `datetime.UTC` (the first catch-up
+  failed on that import).
+- **Replay** (`batch/lineage.py`, stdlib): `spark_dataset` (the symlink rename), `spark_replay_events` (kept runs and
+  job suffixes), `read_json_lines` (a broken line raises `ReplayError` naming `file:line`), `newest_spark_runs`;
+  `replay()` posts them after the Airflow runs and returns one more key, `dockwatch_status_stream`. An
+  `ol-*.json`-only folder replays exactly as before.
+- **Host:** `LINEAGE_SHOT_URL` depth 3, `LINEAGE_SHOT_SELECTOR = r"text=/gbfs\.station/"`, `LINEAGE_DOC` and the copy
+  in `lineage_shot`.
+
+**Real events (the Builder's first catch-up, ~18 min of backlog):**
+`spark-dockwatch-status-stream-20261017T064202Z.jsonl`, 56 events, 272,647 B, 20 runs, every event from
+`/1.54.0/integration/spark` in namespace `dockwatch-spark`. Every REST write carries the symlink. The 7 runs that read
+and write match the plan exactly: `write_to_data_source_v2` twice per table (`gbfs.station_status` →
+`lake.bronze.station_status`, `lake.silver.station_status`, `lake.silver.availability_5m`), each with a START and one
+COMPLETE, and the MERGE once (`lake.silver.station_episodes` → itself). Dropped: 4 `create_table` runs and
+`set_write_distribution_and_ordering` (DDL), `flat_map_groups_in_pandas_with_state`, the two Kafka sinks
+(`execute_save_into_data_source_command` → `dockwatch.station_state`, `gbfs.alerts`) and four writes without an
+input. The replay posts 27 of the 56 events. `check_n.py spark-metrics` counts 1 micro-batch (MERGE runs), so a
+`stream` hour would write ~16 MB; D1 stands.
+
+**Measured:**
+- Catch-up JVM with the listener (5 s sampler, three catch-ups: this one and the two of the check run): **980**,
+  **1,227** and **1,283** MiB of 2,048, inside the archived 1,129–1,414 MiB without it; the `verify-lake` JVMs right
+  after them (no listener) 1,400, 1,636 and 1,541 MiB. Catch-up + `verify-lake` 60–76 s. The check run's catch-ups
+  wrote 57 events / 275,004 and 275,002 B each, and the replay posted 27 of them.
+- Marquez after `lineage-replay` (111 events: 84 Airflow + 27 Spark): `marquez-api` 242 MiB, `marquez-db` 70 MiB,
+  `marquez-web` 20 MiB; 30 jobs in `dockwatch`, 5 in `dockwatch-spark` (the application and the 4 replayed jobs).
+  `GET /api/v1/lineage` at the shot's centre and depth: 33 nodes, with a directed path from `gbfs.station_status` to
+  every mart.
+- The screenshot: 1600 × 1000, 156,889 B (budget 400,000).
+
+**Loop M3's Checker numbers** (its final review): **205 / 205**, 0 regressions; **91 task runs**, 0 incomplete, 0 new
+crash dumps; TIME_WAIT on :5179 drained **109** → 0 in 100 s before `accept-alerts-stable` and **235** → 0 in 110 s
+before the full suite, 0 Tcpip events, no U1 re-run; Trino's first JVM **1,945** MiB (under the 1,950 flag line),
+the `marts_daily` JVM 1,743–1,804 MiB; `airflow-cli` max **732** MiB (the backfill); Marquez api 276 / db 69 / web
+21 MiB; `data/lineage` 878 event files, **6.27 MB**.
+
+**Tests:** `tests/test_spark_lineage.py` (7 host tests on a trimmed real catch-up file,
+`tests/fixtures/lineage/spark-dockwatch-status-stream-20261017T064202Z.jsonl`, 25 events, 121,952 B) and
+`tests/web/pipeline-lineage-full.spec.js` (3 Playwright tests: the full-graph alt / caption / takeaway, the stream
+list, every table job name on one line at 320 / 390 / 768 / 1440 px with no page scroll; the last one fails on
+1e1260a's CSS at 320 px). Host 146 pass, 7 skipped; Playwright 81.
+
+**The Builder's check run** (all 223 checks in order, foreground chunks, the plan's preconditions: `lineage-stop`
+first, the TIME_WAIT drains, memory waits, the Tcpip events log): **223 / 223 passed**, 0 regressions, no U1 re-run.
+TIME_WAIT on :5179 109 → 0 in 110.5 s before `accept-alerts-stable` and 235 → 0 in 115.5 s before the full suite (81
+passed); 0 Tcpip 4227 / 4231 / 4266 events. 91 task runs, 0 incomplete, 0 new crash dumps; `data/lineage` 1,307 files,
+10.1 MB. Trino's first JVM up to 1,980 MiB in the trips checks and 2,002 MiB over the whole run (this loop's baseline
+2,008; above the 1,950 flag line, flag only: Loop N adds no Trino work), the `marts_daily` JVM 1,785–1,812 MiB;
+`airflow-cli` max 753 MiB (the backfill); Marquez api 275 / 254 MiB in the two cycles, db 71, web 29 MiB; the Linux
+web container 2,856 MiB.
+
+## 2026-10-19 · Loop N2 · Loop N's work restored and verified; the memgate stop is host memory outside Docker
+
+**Why a Loop N2:** Loop N's Checker run (iteration 1, uncommitted) ended in **STOP_REGRESSION**: **216 / 223** checks
+ran to an exit code. Six checks that passed at baseline did not pass:
+- **not run, memgate below threshold** (the hard **1,536** MiB memgates were not bypassed and not re-run):
+  `accept-i-trips-legacy`, `accept-i-backfill` and `accept-i-trips-rerun` (`metric-i-memgate-trips`: free **1,055** →
+  **1,315** MiB after the console stop and 300 s; the soft wait before it ran 600 s, best 1,483), and
+  `accept-k-health` (`metric-k-memgate-health`: **969** → **991** MiB; soft wait 600 s, best 1,181);
+- **knock-ons:** `accept-l-health` and `accept-m-events`. Their `pipeline_health` / `trip_history_monthly` dag-test
+  records were older than 3 h, because those dag-tests never ran, and `health.json` was not re-copied.
+
+`accept-n-spark-events` also failed, on the same stale `pipeline_health` record. It returns at its first error, so its
+D6 run / edge / page-list assertions were never evaluated; on the same file `metric-n-spark` found exactly the 4
+planned jobs (56 events, 20 runs, 7 replayed), and `accept-n-lineage` passed. Every other Loop N acceptance check
+passed and every other check matched the baseline. The producer and exporter stayed alive.
+
+**Loop N's Checker numbers:** catch-ups with the listener **1,595** and **1,430** MiB (5 and 3 samples; above the
+archived 1,129–1,414 MiB without it, under the 1,700 flag line; no OOMKilled); `metric-n-spark` 56 events /
+272,646 B per catch-up, 16.4 MB/h projected for `stream` (D1 stands); Marquez api 272 / 248 MiB in the two cycles;
+Trino's first JVM **2,030** MiB (above the 1,950 flag line, flag only); TIME_WAIT on :5179 103 → 0 in 90 s before
+`accept-alerts-stable` and 235 → 0 in 111 s before the full suite; one Tcpip **4266** event, inside a passing
+`accept-web-full-suite` (81 / 81); 0 U1 re-runs.
+
+**Diagnosis (plan time, read-only, from the archived logs plus live readings).** Free host memory at the gates, MiB
+(memgate `free_before → free_after`; the gate is 1,536):
+
+| Gate | Baseline (1e1260a, old image) | Loop N Builder (same tree + image) | Loop N Checker |
+|---|---|---|---|
+| batch (Trino stopped, right before `batch-up`) | 2,098 | 3,039 | 2,351 |
+| trips | 2,446 → 2,479 | 1,576 → 1,571 | 1,055 → 1,315 (console stopped, 300 s); soft wait 600 s, best 1,483 |
+| health | 2,287 (soft wait 240 s) | 2,520 (soft wait 540 s) | 969 → 991; soft wait 600 s, best 1,181 |
+
+- **Health gate:** the containers were the size they were at baseline (`docker stats` sum 3,736 vs 3,691 MiB; Trino
+  1,863 vs 1,855; s3 813 vs 937), yet host free was 1,318 MiB lower.
+- **Trips gate:** the containers were 0.4–0.6 GB larger (s3 856–1,001 vs 543–560 MiB, redpanda 555 vs 334): growth of
+  the stream stack over 2.5 days of data, not Loop N. Trino was the same (1,833–1,976 vs 1,914–1,961). Host free was
+  1,391 MiB lower, so at least 0.8 GB of the drop lies outside Docker.
+- **Before `batch-up`** the failed run had *more* free memory than the baseline (2,351 vs 2,098). From there to the
+  trips gate it lost 1,296 MiB (the Builder's run lost 1,463), while the baseline gained 348, with the same Trino work
+  in all three.
+- **What held the memory** (the Checker's tasklist at 09:57): **Chrome** ~3.5 GB and **vmmemWSL** ~5.6 GB against
+  ~3.7 GB of containers, so the Docker VM held ~1.9 GB beyond its containers. That **page cache** was not returned
+  during 900 s of waiting at each gate.
+- **Plan-time idle readings** (Trino stopped, Chrome open at 3.3–3.5 GB): first host free 1,770 MiB, vmmemWSL 4,652,
+  the VM's `Cached` 3,170, containers 2,070; five minutes later (`hostmem.py snap`) 3,725, 2,546, 767 and 1,875. The VM
+  returns its page cache only when it idles, which never happens during the batch block.
+- **Loop N did not contribute:** no Loop N code runs at either gate (Spark runs are `compose run --rm`, and none runs
+  in the batch block); Loop N changes no DAG, Trino work or compose service; the Builder's full run of the same tree
+  and image cleared every gate, trips by only 40 MiB. Margins without ~3 GB free before `batch-up` are luck. Side
+  note: the first catch-up's 1,595 MiB is +252 on the baseline, on 5 samples, under the 1,700 flag (flag only).
+- **Conclusion: host memory, purely.** Windows apps (Chrome) plus the Docker VM's unreturned page cache took the
+  headroom the memgates need with Trino at ~1.8–1.9 GiB; either one alone covers the misses (221 and 545 MiB).
+  Closing Chrome is the only lever the evidence shows to be both large enough and in reach.
+
+**Rejected:**
+- bypassing, lowering or re-running a memgate, and any `mem_limit` / JVM change (the user's);
+- stopping Trino before the health memgate: `accept-k-health` restarts Trino at once, so the gate would read memory
+  that Trino takes straight back;
+- stopping Trino before the trips memgate: the trips checks query Trino;
+- restarting s3 / redpanda to shed ~0.6 GB: it would risk the stream and exporter checks, and it does not cover the
+  health gate's 545 MiB;
+- `drop_caches` in the Docker VM or a `.wslconfig` change: the user's machine (U2).
+
+**New runner preconditions** (runner steps like the memory waits, not checks). `.loop/checks/n2/hostmem.py` is a local
+loop-runner helper outside the repo: `wait <MiB> <s> <label>` / `snap <label>` print one JSON line (the memgate's own
+free reading, `reached`, the 8 largest Windows images, the Docker VM's `MemAvailable` / `MemFree` / `Cached`, the
+containers' total) and always exit 0. It replaces `waitfree.py` at every memory wait; output goes to `hostmem.log`.
+- **M0:** before the Checker the user closes Chrome (and Discord / Medal if they can) for the whole run, and
+  `hostmem.py snap start` must read ≥ 4,000 MiB free.
+- **M1:** `wait 2000 300` before each Linux web check, as before.
+- **M2:** `wait 3300 300 before-batch` before the chunk that starts at `metric-memory-before-batch`, once more if
+  unreached. **3,300** = 1,536 + the largest measured fall to the trips gate (1,544 MiB, the Builder's) + ~220 MiB.
+- **M3:** `wait 1700 300` (twice at most, each its own foreground call) before every other chunk that starts with a
+  memgate.
+- **M4:** if an M2 / M3 wait is still unreached, the Checker does not start that chunk: it writes `PAUSED.txt` and
+  stops with `PAUSED (host memory) before <id>`, everything left as it is, and the orchestrator asks the user to free
+  memory before a new Checker resumes at that id.
+- **M5:** a pause after `accept-i-trips-legacy` has started must end within 90 min (the 3 h dag-test windows); past
+  that, or if the producer / exporter is reaped, the run is abandoned and redone in full.
+- The memgates themselves are unchanged and stay hard.
+
+**U2, the user's:** close Chrome for full check runs (required for this loop's Checker). Optional and unproven:
+`autoMemoryReclaim` in `%UserProfile%\.wslconfig`, an approved runner step that drops the Docker VM's clean page cache,
+or a `mem_limit` / JVM change.
+
+**The restore:** Loop N's 21 paths were backed up (`loopN-worktree.tgz`, their sha256 sums, `status.txt`) and put away
+as the stash `loopN-iter1`. `git stash pop` was clean and dropped the stash itself; `sha256sum -c` then gave 20 OK and
+1 FAILED, the fixture `spark-dockwatch-status-stream-20261017T064202Z.jsonl`: with `core.autocrlf=input` Git had
+stored and written it back as LF (121,927 B, not the verified CRLF 121,952 B). `tar -xzf loopN-worktree.tgz` restored
+the exact bytes of all 21 paths, and **21 sha256 OK**. `git add -N` on the 4 new files restored the intent-to-add index
+state Loop N's Builder and Checker ran with, and `git status --porcelain` is identical to Loop N's `status.txt`. The
+Spark image is still `348335af7892` (`check_n.py image` ok), not rebuilt.
+
+**Checks:** Loop N's 223, unchanged and in order. No new check and no guard re-base: the committed base is still
+1e1260a, and `.loop/checks/n2/` lies outside every guard's pin glob. N2 changes no product code; its only edits are
+this entry and three in-place CURRENT_STATE edits. The N2 Checker's own numbers go into Loop O's entry.

@@ -421,3 +421,30 @@ main [hidden] {
   min-width: 14rem;
   white-space: normal; /* the dataset lists wrap instead of one very long line */
 }
+
+/* Job names stay whole: the house 16rem cap on row headers broke them mid-word; the table scrolls instead. */
+.lineage__table tbody th {
+  max-width: none;
+}
+
+.lineage__table th code {
+  white-space: nowrap;
+}
+
+.lineage__lead,
+.lineage__stream {
+  margin: 0;
+  font-size: var(--fs-body-sm);
+  color: var(--body);
+}
+
+.lineage__stream {
+  display: grid;
+  gap: var(--space-xs);
+  padding: 0;
+  list-style: none;
+}
+
+.lineage__stream code {
+  overflow-wrap: anywhere; /* the long Spark job names break after a dot (<wbr>) first, never widen the page */
+}

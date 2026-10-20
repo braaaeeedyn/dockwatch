@@ -33,11 +33,13 @@ BUILD_INPUTS = (
 OBS_SERVICES = ("marquez-db", "marquez-api", "marquez-web")
 MARQUEZ_API = "http://localhost:15000"
 MARQUEZ_WEB = "http://localhost:13000"
-# The batch graph from trip_history_monthly.load through dbt_build to the marts, the quality gate and the export.
-LINEAGE_SHOT_URL = f"{MARQUEZ_WEB}/lineage/job/{lineage.NAMESPACE}/marts_daily.dbt_build?depth=2"
-LINEAGE_SHOT = "web/img/lineage-batch.png"
-# The node between download and load, at the far end of the graph from the export: drawn once the graph is.
-LINEAGE_SHOT_SELECTOR = 'text="data/trips/zips"'
+# The full graph: gbfs.station_status through the Spark jobs and dbt_build to the marts, the quality gate and the
+# export (depth 3 from dbt_build reaches the Kafka topic and trip_history_monthly.load).
+LINEAGE_SHOT_URL = f"{MARQUEZ_WEB}/lineage/job/{lineage.NAMESPACE}/marts_daily.dbt_build?depth=3"
+LINEAGE_SHOT = "web/img/lineage-batch.png"  # the name the frozen pipeline-lineage.spec.js pins
+LINEAGE_DOC = "docs/img/lineage.png"  # README's copy, the same bytes
+# The Kafka topic only the Spark half draws, at the far end from the export: drawn once the graph is.
+LINEAGE_SHOT_SELECTOR = r"text=/gbfs\.station/"
 
 
 class BatchError(RuntimeError):
@@ -167,7 +169,8 @@ def lineage_replay() -> None:
 
 
 def lineage_shot(out: str = LINEAGE_SHOT) -> None:
-    """One Playwright CLI screenshot of the batch graph in Marquez web (1600 x 1000) into `out`."""
+    """One Playwright CLI screenshot of the full lineage graph in Marquez web (1600 x 1000) into `out`; the default
+    (the Pipeline page's image) is also copied to docs/img/lineage.png."""
     node = shutil.which("node")  # not npx: on Windows that is npx.cmd, and cmd.exe would mangle the quoted selector
     if not node:
         raise BatchError("node not found: install Node and run npm ci")
@@ -175,6 +178,8 @@ def lineage_shot(out: str = LINEAGE_SHOT) -> None:
     sh(node, "node_modules/@playwright/test/cli.js", "screenshot", "--viewport-size", "1600,1000",
        "--wait-for-selector", LINEAGE_SHOT_SELECTOR, "--wait-for-timeout", "3000", LINEAGE_SHOT_URL, out,
        timeout=180)  # fmt: skip
+    if out == LINEAGE_SHOT:
+        shutil.copyfile(out, LINEAGE_DOC)
 
 
 def lineage_stop() -> None:

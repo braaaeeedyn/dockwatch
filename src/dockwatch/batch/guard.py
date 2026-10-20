@@ -40,6 +40,8 @@ KEEPALIVE_BLOCKERS = ("status-stream", "cdc-apply", "trino")
 # Marquez (lineage-up): refused while Trino, a Spark JVM or Connect runs; while it runs, all of the above refuse.
 LINEAGE_TASKS = ("lineage-up",)
 LINEAGE_BLOCKERS = ("trino", "status-stream", "cdc-apply", "connect")
+# Any Marquez container blocks (a leftover db / web pair still holds ~90 MiB); lineage-up removes leftovers itself.
+MARQUEZ_SERVICES = ("marquez-db", "marquez-api", "marquez-web")
 
 STOP_HINT = {
     "status-stream": "python tasks.py stream-stop",
@@ -52,7 +54,7 @@ STOP_HINT = {
 
 def refusal(task: str, running: Callable[[str], bool]) -> str | None:
     """None if `task` may start now, else the reason it may not (the reason names the running service)."""
-    if task in (*TRINO_TASKS, *SPARK_CONNECT_TASKS, *KEEPALIVE_TASKS) and running("marquez-api"):
+    if task in (*TRINO_TASKS, *SPARK_CONNECT_TASKS, *KEEPALIVE_TASKS) and any(map(running, MARQUEZ_SERVICES)):
         return (
             f"{task}: Marquez running; stop it first ({STOP_HINT['marquez-api']}). Marquez never runs beside Trino, "
             "a Spark JVM or Kafka Connect on this host."

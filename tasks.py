@@ -121,6 +121,8 @@ def catchup() -> None:
     if connect_running():
         print("Kafka Connect is running; stop it first (python tasks.py connect-stop): never beside Spark.")
         sys.exit(1)
+    # Only catchup runs the OpenLineage Spark listener (Loop N): one spark-*.jsonl per run into data/lineage
+    os.makedirs("data/lineage", exist_ok=True)
     sh(
         "docker",
         "compose",
@@ -131,6 +133,10 @@ def catchup() -> None:
         "--no-deps",
         "-e",
         "DOCKWATCH_TRIGGER_MODE=available_now",
+        "-e",
+        "DOCKWATCH_SPARK_LINEAGE_DIR=/opt/dockwatch/data/lineage",
+        "-v",
+        f"{os.path.abspath('data/lineage')}:/opt/dockwatch/data/lineage",
         "status-stream",
     )
 

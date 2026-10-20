@@ -17,6 +17,11 @@ RUN cd /opt/spark/jars && for jar in \
 # pandas + pyarrow for applyInPandasWithState; pydantic-settings for dockwatch.config; pytest for tests/spark
 RUN pip install --no-cache-dir "pandas==2.2.3" "pyarrow==17.0.0" "pydantic==2.9.2" "pydantic-settings==2.5.2" "pytest==8.3.3"
 
+# OpenLineage Spark listener (Loop N; on only in catchup). In /opt/spark/jars, not --jars: it must share the Iceberg
+# and Kafka jars' class loader. sha1 = Maven Central's.
+ARG OPENLINEAGE=1.54.0
+RUN cd /opt/spark/jars && wget -q "${M2}/io/openlineage/openlineage-spark_2.12/${OPENLINEAGE}/openlineage-spark_2.12-${OPENLINEAGE}.jar" && echo "4aacb91670f5043fd214eb52fe44080c8eea7221  openlineage-spark_2.12-${OPENLINEAGE}.jar" | sha1sum -c -
+
 ENV PYTHONPATH=/opt/dockwatch/src
 WORKDIR /opt/dockwatch
 USER spark

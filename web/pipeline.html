@@ -234,10 +234,10 @@
 
           <section class="card chart-card" data-chart="lineage" aria-labelledby="lineage-title">
             <h2 id="lineage-title" class="chart-card__title">Lineage</h2>
-            <p class="chart-card__takeaway">Trip history and silver feed dbt’s three marts; the quality gate checks the marts and silver before the insights export.</p>
+            <p class="chart-card__takeaway">Kafka’s station feed flows through Spark into silver; silver and trip history feed dbt’s three marts, and the quality gate checks the marts and silver before the insights export.</p>
             <figure class="lineage">
-              <img class="lineage__image" src="img/lineage-batch.png" width="1600" height="1000" loading="lazy" decoding="async" alt="Marquez lineage graph of the batch jobs: trip_history_monthly.load writes lake.bronze.trips, which marts_daily.dbt_build reads with the silver tables to build the three marts; marts_daily.quality_gate reads the marts and lake.silver.station_status, and marts_daily.export publishes the insights. The table below lists the same graph.">
-              <figcaption class="caption">Source: OpenLineage events from Airflow, replayed into Marquez 0.51.1 from the newest run of each DAG; captured 16 October 2026. The screenshot shortens long names; the table has them in full.</figcaption>
+              <img class="lineage__image" src="img/lineage-batch.png" width="1600" height="1000" loading="lazy" decoding="async" alt="Marquez lineage graph from the Kafka topic gbfs.station_status through the streaming job’s Spark writes into the silver tables, among them lake.silver.station_status, which marts_daily.dbt_build reads with lake.bronze.trips from trip_history_monthly.load to build the three marts; marts_daily.quality_gate reads the marts and silver, and marts_daily.export publishes the insights. The table below and the list after it give the same graph.">
+              <figcaption class="caption">Source: OpenLineage events from Airflow and the Spark listener, replayed into Marquez 0.51.1 from the newest run of each DAG and the streaming job’s newest catch-up; captured 17 October 2026. The screenshot shortens long names; the table and the list have them in full.</figcaption>
             </figure>
             <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lineage-title">
               <table class="data-table data-table--plain lineage__table">
@@ -255,6 +255,13 @@
                 </tbody>
               </table>
             </div>
+            <p class="lineage__lead">The streaming job’s Spark writes, from the OpenLineage Spark listener:</p>
+            <ul class="lineage__stream" role="list">
+              <li><code>dockwatch_status_stream.<wbr>write_to_data_source_v2.<wbr>lake_bronze_station_status</code> reads gbfs.station_status, writes lake.bronze.station_status</li>
+              <li><code>dockwatch_status_stream.<wbr>write_to_data_source_v2.<wbr>lake_silver_station_status</code> reads gbfs.station_status, writes lake.silver.station_status</li>
+              <li><code>dockwatch_status_stream.<wbr>write_to_data_source_v2.<wbr>lake_silver_availability_5m</code> reads gbfs.station_status, writes lake.silver.availability_5m</li>
+              <li><code>dockwatch_status_stream.<wbr>replace_data.<wbr>lake_silver_station_episodes</code> merges into lake.silver.station_episodes; the MERGE runs in foreachBatch, so it shows only its own table as input</li>
+            </ul>
           </section>
         </div>
       </div>

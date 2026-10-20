@@ -1,6 +1,10 @@
 """SparkSession wiring for the Iceberg catalog, and the DDL for every table the streaming jobs write."""
 
+from datetime import datetime, timezone
+
 from pyspark.sql import SparkSession
+
+from dockwatch.streaming.run_mode import lineage_conf
 
 
 def iceberg_conf(s) -> dict[str, str]:
@@ -27,7 +31,8 @@ def iceberg_conf(s) -> dict[str, str]:
 
 def build_session(s, app: str) -> SparkSession:
     builder = SparkSession.builder.appName(app)
-    for key, value in iceberg_conf(s).items():
+    now = datetime.now(timezone.utc)  # noqa: UP017 - datetime.UTC is 3.11+, and the Spark image runs 3.10
+    for key, value in (iceberg_conf(s) | lineage_conf(s, app, now)).items():
         builder = builder.config(key, value)
     return builder.getOrCreate()
 
