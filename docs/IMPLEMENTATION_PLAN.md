@@ -388,7 +388,12 @@ All of these follow [`DESIGN.md`](DESIGN.md). Every page must work from 320 px t
       reduced-motion pass; Lighthouse ≥ 95 performance and 100 accessibility on the Live page. *(Loop K:
       `tests/web/launch.spec.js` does the 48 screenshots, the keyboard-only pass and the reduced-motion pass, and axe
       runs on every page in both themes; Lighthouse is not run (it needs a new devDependency and belongs with the
-      deployed site), so not ticked.)*
+      deployed site), so not ticked.)* *(Loop P: Lighthouse 12.8.2 now runs locally on the Live page with
+      `python tasks.py lighthouse` (pinned in `tools/lighthouse`, Playwright's Chromium, the frozen fixtures served
+      without compression like S3, median of 5 runs per configuration): accessibility 100 in every run; performance
+      medians mobile 84 live / 77 paused, desktop 100 live / 95 paused (`docs/METRICS.md`). Still not ticked: mobile is
+      under 95 (the paused banner and the 208 KB `live.json`, DESIGN_BACKLOG #66), and the deployed-site run needs
+      AWS.)*
 - [x] "Replay a day" mode for when the pipeline is off. *(2026-10-08: built early with the paused state:
       `python tasks.py replay-export` → `web/data/replay.json` from the raw archive, played at 10× from the
       paused banner; the file is refreshed by hand for now.)*

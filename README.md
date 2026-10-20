@@ -6,7 +6,7 @@ A real-time bike-share lakehouse on public Bay Wheels data: live GBFS station st
 processed by Spark Structured Streaming into Apache Iceberg tables, is joined with trip history and a CDC-replicated
 operations database, and is published as tested, lineage-tracked marts, alerts and a live station map.
 
-> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; Loop N: the OpenLineage Spark listener in `catchup`, joined with the Airflow lineage, and the full graph on the Pipeline page and in `docs/img/lineage.png`; Loop O: local measurements in [`docs/METRICS.md`](docs/METRICS.md), each with its command (an hour of `stream`, 10× and 50× replays into lab tables, compaction before / after, a SIGKILL crash-restart); next: a local Lighthouse run, then the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
+> **Status:** early build (M2 streaming done; site shell F1 and live station map F2 done; M3 CDC done: Postgres ops database → Debezium → Kafka → Spark `MERGE INTO` Iceberg, verified by row counts and checksums; M4a done: Airflow + Trino on demand, Iceberg maintenance, partition evolution demo, CDC slot keepalive; M4b done: Bay Wheels trip history with a 12-month backfill, the dbt marts on Trino and the insights JSON; Loop K: the Insights page `web/insights.html` (F4) on a compact insights format, pipeline health (`pipeline_health` → `web/data/health.json`) on the Pipeline page `web/pipeline.html`, `iceberg_maintenance` on the M4b tables too, `dbt compile` in CI, and launch tests; Loop L: Great Expectations (suite `silver_station_status` on the newest 24 hours of silver) inside `marts_daily`'s quality gate, with its results on the Pipeline page, and a latency chart in durations; Loop M: OpenLineage from the Airflow batch DAGs (file transport into `data/lineage`), replayed into Marquez on demand, and the batch lineage card on the Pipeline page; Loop N: the OpenLineage Spark listener in `catchup`, joined with the Airflow lineage, and the full graph on the Pipeline page and in `docs/img/lineage.png`; Loop O: local measurements in [`docs/METRICS.md`](docs/METRICS.md), each with its command (an hour of `stream`, 10× and 50× replays into lab tables, compaction before / after, a SIGKILL crash-restart); Loop P: Lighthouse 12.8.2 on the Live page, run locally with `python tasks.py lighthouse` (accessibility 100 in every run; performance medians 84 / 77 on a simulated phone and 100 / 95 on desktop, live / paused data), and the title row no longer shifts on phones; next: the AWS milestone, which needs an account). See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for exactly what works today.
 
 DockWatch is an independent portfolio project. It is **not affiliated with Lyft or Bay Wheels**.
 
@@ -136,6 +136,7 @@ The site in `web/` is static (no build step). Serve it and run its tests (Node 2
 python -m http.server 5179 --bind 127.0.0.1 --directory web   # http://127.0.0.1:5179
 npm ci                               # Playwright 1.64.0 + axe (dev only)
 npx playwright test                  # every page: layout, accessibility, behaviour, launch screenshots (uses tests/web/fixtures)
+python tasks.py lighthouse           # Lighthouse 12.8.2 (tools/lighthouse, Playwright's Chromium) on the Live page: mobile / desktop x live / paused, 5 runs each -> data/metrics/lighthouse-<UTC>.json
 ```
 
 **CI** (`.github/workflows/ci.yml`, on pushes to `main` and on pull requests) runs ruff, `ruff format --check`,
@@ -149,6 +150,9 @@ on Node 24 and a repeat job for the alerts and shell specs. Playwright runs with
   after a SIGKILL mid-batch; compaction took silver from 419 to 11 files and a station query from 287 to 163 ms.
   Measured locally, each number with its command, in [`docs/METRICS.md`](docs/METRICS.md). The Athena bytes-scanned
   number waits for the AWS account.
+- Lighthouse on the Live page, run locally on the frozen fixtures: accessibility 100 in every run, performance 100
+  on desktop and 84 on a simulated phone (live data; 95 / 77 with the paused banner), each a median of 5 runs
+  ([`docs/METRICS.md`](docs/METRICS.md)). The deployed site waits for the AWS account.
 
 ## Data and licence
 - **Bay Wheels GBFS feeds** and **trip history**: Bay Wheels data is provided by Lyft Bikes and Scooters, LLC

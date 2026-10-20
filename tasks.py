@@ -507,6 +507,8 @@ TASKS = {
     "stream-lab-stop": lambda *a: stream_lab_stop(),
     "crash-restart": lambda *a: crash_restart(),
     "measure": lambda *a: uv("python", "-m", "dockwatch.measure", *a),
+    # Loop P (F5): Lighthouse 12.8.2 (tools/lighthouse) on the Live page with Playwright's Chromium, never beside a JVM
+    "lighthouse": lambda *a: uv("python", "-m", "dockwatch.lighthouse", *a),
     "export": lambda *a: uv("python", "-m", "dockwatch.exporter", *a),
     # "Replay a day" file from the raw GBFS archive (host only, no Spark). Not `replay`: that re-publishes to Kafka.
     "replay-export": lambda *a: uv("python", "-m", "dockwatch.exporter.replay", *a),

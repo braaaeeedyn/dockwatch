@@ -138,6 +138,8 @@ The same query ran 1.8× faster on 11 files than on 419. The bronze file counts 
 2. It sends **SIGKILL** at once (`docker kill`, exit 137, no shutdown hook). Here that was 03:19:02Z, 0.35 s after
    the queries started: silver batch 301 had its offsets logged and nothing committed. Bronze 205, availability 302
    and episodes 204 were in flight as well.
+   So the kill landed after the offsets log and before any data file was written. A kill between the Iceberg commit
+   and `commits/<n>` (data committed, the batch not yet marked done) was not exercised.
 3. It reads `gbfs.station_status`'s end offsets, runs `python tasks.py catchup` and then `verify-lake`, and writes
    `data/metrics/crash-restart-20261020T031902Z.json`.
 
@@ -157,3 +159,35 @@ lab JVM peaked at 2,033 MiB at 10× and 2,005 MiB at 50×. The catch-ups peaked 
 1,261 MiB, `verify-lake` at 1,459 MiB. Trino peaked at 1,970 MiB in `iceberg_maintenance`, 1,380 MiB in
 `pipeline_health` plus the window query, and 997 MiB for the lab windows. None was OOMKilled. Host free memory stayed
 between 2,643 and 6,294 MiB.
+
+## Lighthouse (Live page)
+Measured on 2026-10-20 UTC during Loop P (run `20261020T081417Z`, 08:14:17Z – 08:18:17Z; unlike the runs above, the
+user's Chrome was open) with `python tasks.py lighthouse`: Lighthouse 12.8.2, pinned in `tools/lighthouse` with its own
+`package-lock.json` (axe-core 4.14.0, installed with `npm ci --ignore-scripts`), on Playwright 1.64.0's Chromium
+156.0.8078.4 (headless). The task serves a copy of `web/` whose `data/` is the frozen `tests/web/fixtures` (641
+stations, `live.json` 208 KB) with `tests/web/serve.py`: no compression and no cache headers, like S3 static hosting.
+Mobile is Lighthouse's default (412 px, simulated slow 4G, 4× CPU slowdown); desktop is `--preset=desktop` (1350 px).
+Paused data is the fixtures byte-exact; live data moves their `generated_at` / `data_as_of` to each run's start. Each
+value is the median of 5 runs, and accessibility is the lowest of the 5. The deployed site needs AWS and has not been
+measured.
+
+| Configuration | Performance | Accessibility | FCP | LCP | TBT | CLS | Command | Run |
+|---|---|---|---|---|---|---|---|---|
+| Mobile, live data | 84 | 100 | 2.3 s | 4.2 s | 0 ms | 0.008 | `python tasks.py lighthouse` | `20261020T081417Z` |
+| Mobile, paused data | 77 | 100 | 2.3 s | 4.5 s | 0 ms | 0.144 | `python tasks.py lighthouse` | `20261020T081417Z` |
+| Desktop, live data | 100 | 100 | 0.5 s | 0.6 s | 0 ms | 0.016 | `python tasks.py lighthouse` | `20261020T081417Z` |
+| Desktop, paused data | 95 | 100 | 0.5 s | 0.9 s | 0 ms | 0.128 | `python tasks.py lighthouse` | `20261020T081417Z` |
+
+- **Per run (performance):** mobile live 92, 93, 83, 83, 84; mobile paused 76, 77, 77, 75, 77; desktop live 100, 100,
+  100, 100, 99; desktop paused 95, 93, 93, 95, 95. Accessibility 100, best practices 96 (the only console error is a
+  404 for `favicon.ico`) and SEO 100 in all 20 runs. The reports are in `data/lighthouse/20261020T081417Z/`, the
+  record in `data/metrics/lighthouse-20261020T081417Z.json`.
+- **Mobile live is bimodal:** the LCP element is the lede, and Lantern puts it at ~2.9–3.0 s or ~4.2–4.4 s depending
+  on whether the fast local trace paints it before the `live.json` request starts (92 / 93 against 83 / 83 / 84).
+- **Mobile paused:** the LCP element is the paused banner's text, which waits for the 208 KB `live.json` at a
+  simulated 1.6 Mbps, and the banner moves the KPI tiles below it (CLS 0.135–0.148; DESIGN_BACKLOG #66).
+- **Before the title-row fix** (24d48aa, medians of 3–5 runs at plan time): mobile 80 live / 70 paused with CLS
+  0.23–0.27, desktop 100 / 93. The freshness pill's text grew from "Loading…" and wrapped under the title (+40 px);
+  below 768 px it now always sits under the title, so the mobile live CLS fell to 0.008.
+- Lighthouse's Chromium peaked at 877 MiB (the working sets of Playwright's `chrome.exe`, sampled every 5 s); host free
+  memory stayed between 3,552 and 4,755 MiB.

@@ -2304,3 +2304,154 @@ note on the M6 METRICS.md item, still unticked).
 **Left as lab data on purpose** (the user's deletion list): `lake.lab_bronze.*` / `lake.lab_silver.*` (660,212 rows
 each in station_status), `gbfs.alerts.lab`, `dockwatch.station_state.lab`, the 660,212 replayed records in
 `gbfs.station_status.replay` (they expire after 7 days) and `/checkpoints/lab/`.
+
+## 2026-10-20 · Loop P · F5 Lighthouse on the Live page, run locally, and the title-row fix it found
+
+**Goal:** run Lighthouse on the Live page locally, pinned (no floating versions), as a repeatable task
+(`python tasks.py lighthouse`: mobile and desktop, live and paused data, 5 runs each), with accessibility 100 in every
+run as the acceptance check and the performance median of 5 as a metric with bars set from measured margin; fix what
+it finds within the frozen design and tests (one fix: the title row's layout shift on phones); tick F5's Lighthouse
+item only if every performance median is ≥ 95, otherwise add a Loop P note. The deployed-site run stays with the user.
+Also the Loop O carry-overs (the O Checker numbers below, METRICS.md's crash caveat, CURRENT_STATE's lab totals) and
+the re-base of `check_o.py` onto 0aa1288..24d48aa (done in the plan).
+
+**O Checker** (the carry-over from Loop O, as N2's numbers went into Loop O's entry): the fresh full run of
+2026-10-19 21:39:50–22:43:00 local (run start 2026-10-20T04:39:40Z) passed **235 / 235** (203 non-metric checks pass
++ 32 metrics exit 0; 640 pass / 14 skip / 0 fail per test), with 0 regressions against N2; the 10 new Loop O checks
+passed. `hostmem.log` (host free / vmmemWSL / the VM's `Cached` / containers, MiB): start **4,330** / 3,853 / 1,762 /
+2,200; before-batch **3,974**; the trips-gate wait 1,821 / 6,475 / 1,775 / 4,227; the health-gate wait 2,197 / 6,370 /
+1,767 / 4,299; end 3,158; Chrome, Discord and Medal absent; every wait was reached on its first call, with no pause.
+Memgates `free_before → free_after`: airflow-tests 4,158 → 4,134, batch 3,952 → 3,940, trips **1,750** → 1,766 (214
+above the 1,536 gate), marts 2,952 → 2,960, health **2,153** → 2,146, keepalive 3,623 → 3,629, m-lineage 3,235 →
+3,233, n-lineage 3,251 → 3,253, o-spark 3,527 → 3,540. The run started low because the Docker VM still held its cache
+from the Builder's campaign that evening (N2 started at 6,482). Loop O's checks: the recompute gave 1× **40,114** rows
+/ 60 batches / 0 unpaired, 10× 155,040 rows / 26 batches / 240 snapshots / **9.807**×, 50× 505,172 / 17 / 782 /
+**48.013**×; `metric-o-files` 11 files, median 116 ms (3 runs); the crash-restart took **73.9 s**, SIGKILL at
+05:37:41Z with silver batch 312 in flight, **4,003,123** bronze rows = distinct offsets, 0 duplicates / 0 missing; the
+lab replay took 194 s, **38,760** records sent = the lab tables' gain, production unmoved. Spark: catch-ups 1,010 /
+1,067 / 1,153 MiB (3–4 samples, lower bounds), `verify-lake` 1,572 / 1,610 / 1,512, the lab container **1,569**; the
+crash's stream lived 6.1 s (no reading). Trino's first JVM **2,025** MiB (flag only; N2 2,004), trips 1,870–1,932,
+marts 1,795, health 1,441 (1,483 with the recompute); Marquez api 295 / 261 MiB; the PNG **156,889** B;
+`metric-n-spark` 57 events / 275,005 B per micro-batch / 16.5 MB/h; `airflow-cli` 746 MiB; health.json **82,510** B;
+nav-motion 0 misses; TIME_WAIT 109 → 0 in 100.5 s and 235 → 0 in 105.5 s; 0 Tcpip events; 0 **U1** re-runs; 91 task
+runs, 0 incomplete, 0 new crash dumps; the Linux web checks 2,910 / 2,598 MiB. The final review recorded three flags,
+none OOMKilled and none changed: the stream / lab JVMs at 2,022 / 2,033 MiB in docker stats on the long runs, Trino's
+first JVM at 2,025 MiB, and the thin trips margin.
+
+**Plan-time findings (2026-10-19/20):**
+- **Versions:** Node 20.18.0 and npm 11.11.1 on the host. Lighthouse 13.5.0 needs Node ≥ 22.19, so **Lighthouse
+  12.8.2** (2025-08-28) is the newest that runs on Node 20. Its dependencies are ranges (`axe-core ^4.10.3`); resolved
+  today: axe-core 4.14.0, puppeteer-core 24.43.1, chrome-launcher 1.2.2, 200 packages. Playwright 1.64.0's Chromium
+  is **156.0.8078.4** (`chromium-1248`); Lighthouse 12.8.2 ran with it over 100 times with no `runtimeError` and no
+  `runWarnings`.
+- **Baseline at 24d48aa** (medians of 3–5 runs on the fixtures): mobile 70 paused / 80 live, CLS 0.234–0.264 / 0.23;
+  desktop 93 / 100. Accessibility was already 100 everywhere; best practices 96 (a 404 for `favicon.ico`), SEO 100.
+  The real `web/data` gives the same numbers while paused.
+- **Where the shift comes from** (layout-shift sources at 412 × 823): (a) the **title row** wraps when the freshness
+  pill grows from "Loading…" to "Live · …" or "Paused · …" (+40 px, ~0.23, in both states); (b) the **paused** banner
+  appears above the KPI tiles (+137–157 px); (c) "Replay a day" joins the banner later (+52 px); (d) a font-swap shift
+  of 28 px at desktop widths (CLS 0.016, no score effect). The row's height changed at 390–600 px (live) and 390–660 px
+  (paused); a 600 px breakpoint is not enough, 768 px holds at all 21 widths with the longest text.
+- **Rejected by measurement:** `modulepreload` for the 15 modules (mobile 69 / 70, no gain) and preloading Plex Sans
+  400 (mobile live worse, median 82.5).
+
+**Decisions (plan D1–D11):**
+- **D1:** Lighthouse is its own npm project, `tools/lighthouse/`: `package.json` is exactly
+  `{"private": true, "devDependencies": {"lighthouse": "12.8.2"}}`, and its `package-lock.json` pins all 200 packages
+  with a registry URL and an sha512 integrity. The task installs with `npm ci --ignore-scripts` through node's own
+  `npm-cli.js`. Not `npx --yes lighthouse@12.8.2` (axe-core and the rest would float), not a root devDependency (CI's
+  `npm ci` would install 176 MB it never uses), not Lighthouse 13 (Node 22).
+- **D2:** Playwright's Chromium as `CHROME_PATH`, `--headless=new`; never the user's Chrome. **D3:** a temporary copy
+  of `web/` whose `data/` is the frozen `tests/web/fixtures`, served by the frozen `tests/web/serve.py` on 5180 (no
+  compression, no cache headers, like S3 static hosting); never `web/data`, which the exporter rewrites.
+- **D4:** 4 configurations × 5 runs (mobile = Lighthouse's default, desktop = `--preset=desktop`; paused = the fixtures
+  byte-exact, live = their timestamps moved to each run's start). **D5:** accessibility 100 in every run; performance
+  median bars 78 / 72 / 95 / 90 (mobile live / paused, desktop live / paused), each 3 or more under the lowest run
+  measured with the fix; mobile CLS ≤ 0.05 live and ≤ 0.2 paused. **D6:** F5 is ticked only when all four medians are
+  ≥ 95 (expected: not ticked).
+- **D7, the fix:** below 768 px the title row is a column, so the freshness pill always sits under the title; CSS only.
+  DESIGN.md is frozen, so DESIGN_BACKLOG **#65** records it. **D8:** found, not fixed (below). **D9:** the task refuses
+  beside Trino, a Spark JVM, Connect or Marquez (Chromium ~880 MiB). **D10:** the Checker starts after
+  `hostmem.py wait 5000 300 start` (at most two calls) and at ≥ 4,000 MiB. **D11:** U1 covers the two new host
+  Playwright checks, not the Lighthouse checks.
+
+**Built:**
+- `web/css/layout.css`: `@media (max-width: 767.98px) { .page-header__title-row { flex-direction: column;
+  align-items: flex-start; } }`. No HTML or JS change; `@keyframes nav-menu-in` untouched.
+- `tools/lighthouse/package.json` and `package-lock.json` (generated once with
+  `npm install --package-lock-only --ignore-scripts --no-audit --no-fund`; identical to the plan-time lock except its
+  `name`). `tools/lighthouse/node_modules/` is ignored by the existing `node_modules/` rule.
+- `src/dockwatch/lighthouse.py` (stdlib + `dockwatch.batch.guard`): `refusal()`, `build_site()`, `make_live()` (it
+  writes compact JSON, so every byte but the stamps is the fixture's), `lighthouse_cmd()` (the local
+  `node_modules/lighthouse/cli/index.js`, `--preset=desktop` for desktop only, no throttling or form-factor option),
+  `scores()` / `summarize()` (a missing report, a `runtimeError` or an unscored category is not a run),
+  `playwright_chromium()`, and `main()`: refusal, node, `npm ci` when the pinned CLI is missing, Playwright's
+  Chromium, port 5180 free, the site and `serve.py` (always terminated), 20 runs with `CHROME_PATH` and a 180 s
+  timeout each (a timed-out run's process tree is killed with `taskkill /T`, so no headless Chromium is left behind),
+  one progress line per run, the record `data/metrics/lighthouse-<UTC>.json` and the reports in
+  `data/lighthouse/<UTC>/`. Exit 0 only when every run reported accessibility 100.
+- `tasks.py`: one TASKS key, `lighthouse`.
+- `tests/test_lighthouse.py` (5 host tests, subprocesses and `running_services` faked; the fourth also runs `main()`
+  end to end with fake node, npm, `serve.py` and Lighthouse and checks the `npm ci` command, `CHROME_PATH` on all 20
+  runs, the order and data state of each run and the record). Host tests: 162 pass, 7 skipped.
+- `tests/web/live-title.spec.js` (2 tests): at each of 21 widths from 320 to 2560 px the page loads with `live.json`
+  held, the title row's height is read under "Loading…", `live.json` is released, and the height must stay within
+  0.5 px once the pill says Live (or Paused). The data is the fixture with `generated_at` 2026-10-18T06:59:45Z, so the
+  pill shows its longest text in both states ("Data as of Oct 17, 11:59:45 PM", a two-digit day and hour, the date
+  shown because the page's clock is on the next Pacific day); `page.clock.setFixedTime` keeps the state from drifting
+  to Delayed across the 21 loads. At 24d48aa both tests fail (390 px: 33.6 → 73.9 px); with the fix they pass.
+
+**Measured** (Builder, 2026-10-20 08:14:17Z – 08:18:17Z, run `20261020T081417Z`, `python tasks.py lighthouse`, 4 min;
+the first run installed the lock with `npm ci` in 14 s; the user's Chrome was open, 2.4–3.4 GB):
+
+| Configuration | Performance per run | Median | Accessibility | FCP | LCP | TBT | CLS (runs) |
+|---|---|---|---|---|---|---|---|
+| mobile, live | 92, 93, 83, 83, 84 | 84 | 100 × 5 | 2.3 s | 4.2 s | 0 ms | 0.008 × 5 |
+| mobile, paused | 76, 77, 77, 75, 77 | 77 | 100 × 5 | 2.3 s | 4.5 s | 0 ms | 0.135–0.148 |
+| desktop, live | 100, 100, 100, 100, 99 | 100 | 100 × 5 | 0.5 s | 0.6 s | 0 ms | 0.016 × 5 |
+| desktop, paused | 95, 93, 93, 95, 95 | 95 | 100 × 5 | 0.5 s | 0.9 s | 0 ms | 0.128–0.146 |
+
+Each value is the median of 5; axe-core 4.14.0 (the lockfile's), `HeadlessChrome/156.` in every report, no
+`runtimeError`, no `runWarnings`; best practices 96 and SEO 100 in all 20. Mobile live is bimodal as at plan time
+(the lede's LCP at ~2.9–3.0 s or ~4.2–4.4 s). Every bar holds (84 ≥ 78, 77 ≥ 72, 100 ≥ 95, 95 ≥ 90), and the mobile
+CLS maxima are 0.008 (bar 0.05) and 0.148 (bar 0.2). The mobile medians are under 95, so **F5 stays unticked** with a
+Loop P note. Lighthouse's Chromium peaked at 877 MiB (Playwright's `chrome.exe` working sets every 5 s); host free
+4,370 MiB at the start, 3,552 at the lowest, 4,577 after.
+
+**Checks the Builder ran** (all pass): ruff, `ruff format --check`, `uv run pytest -q` (162 pass, 7 skipped); the 61
+`*-scope` / `-guard` / `-titles` / `-stack` / `-tests-named` / `-unit-tests` checks, Loop P's included; after a
+TIME_WAIT drain (0 → 0, then 50 → 0 in 115.5 s) `accept-p-title-e2e` (2 pass), `accept-p-title-stable` (6 pass),
+`accept-web-full-suite` (83 pass), `accept-k-launch-e2e`, `accept-touch-targets`, `accept-web-shell-e2e`,
+`accept-web-live-e2e`; `accept-ci-linux-web` and `-repeat` (83 pass each in Linux, after `hostmem.py wait 2000`:
+4,725 / 2,294 MiB); `accept-p-lighthouse`, `accept-p-lighthouse-perf`, `metric-p-lighthouse`; every docs check. No U1
+re-run was needed.
+
+**Found, not fixed** (design calls, frozen formats and tests, deploy / AWS, or measured dead ends):
+- the **paused** banner's shift (CLS 0.135–0.148 on phones) and its text as the LCP behind the 208 KB `live.json`:
+  DESIGN_BACKLOG **#66** (reserve its space, place it between the KPI tiles and the map, or keep it);
+- "Replay a day" joining the banner later (+52 px): a JS change in the frozen replay / pause flows;
+- the desktop font-swap shift (CLS 0.016, no score effect);
+- `live.json`'s weight: it is already compact JSON, so lighter means a format change, which the frozen fixtures and
+  tests pin; no compression or cache headers: the deploy, AWS;
+- 5 render-blocking stylesheets: merging them needs a build step the site does not have;
+- the bimodal mobile LCP: a Lantern artifact of the 100 ms local trace; deferring init by a frame would fight the
+  frozen `page.clock` specs;
+- the `favicon.ico` 404 (best practices 96): a design asset;
+- `modulepreload` and the font preload: measured and rejected.
+
+**Deviations from the plan:**
+- **DESIGN_BACKLOG numbering:** the plan put the new rows "after #64" as #65 and #66, but #65 already existed (Loop
+  N's lineage card, 2026-10-17). `check_p docs` requires the new rows to be numbered 65 and 66, so the title-row row
+  is a second #65, right after Loop N's, and says so in its first cell. Renumbering it to #66 / #67 needs a revision of
+  that check. In these docs "#65" with the freshness pill means Loop P's row.
+- The spec's data uses `generated_at` 2026-10-18T06:59:45Z instead of the plan's example 05:24:19Z, so the live state
+  shows the date as well (the longest live text), and `setFixedTime` pins the page's clock.
+- Two small additions to the module beyond the listed interface: `playwright_chromium()` (so the host test needs no
+  root `node_modules`, which CI's python job lacks) and the process-tree kill on a timed-out run.
+- The Builder's Lighthouse run had the user's Chrome open (plan time had it closed); the numbers stayed inside the
+  plan-time ranges.
+
+**Docs:** `docs/METRICS.md` (the crash caveat: the kill landed after the offsets log and before any data file, so a
+kill between the Iceberg commit and `commits/<n>` was not exercised; a Lighthouse section with the cited run's
+table), README (status, the task, a Results line), CURRENT_STATE (rewritten in place), `IMPLEMENTATION_PLAN.md` (a
+Loop P note on F5's Lighthouse item, still unticked), DESIGN_BACKLOG (#65, #66).

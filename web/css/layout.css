@@ -219,6 +219,15 @@ main {
   gap: var(--space-md) var(--space-lg);
 }
 
+/* Below 768 px the freshness pill always sits under the title: when its text grows from "Loading…" the row would
+   otherwise wrap and move the page (Lighthouse CLS 0.23 on phones; DESIGN_BACKLOG #65). */
+@media (max-width: 767.98px) {
+  .page-header__title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 .lede {
   font-size: var(--fs-body-lg);
   color: var(--body);
